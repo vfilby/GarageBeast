@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"><title>Eye Control</title>
+<style>
+/* Layout goal: eyes preview + drag pad + tracker camera always visible together (no page scroll);
+   only the button panel scrolls if it has to. Wide screens put the buttons in a side column,
+   phones stack them underneath. */
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr);gap:8px;padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));
+  font:15px system-ui,sans-serif;background:#111;color:#eee;overflow:hidden;-webkit-tap-highlight-color:transparent;user-select:none}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-height:1.4em}
+header h1{font-size:17px;margin:0;font-weight:600}
+#status{font-size:13px;color:#8a8}
+#status.off{color:#c66}
+/* projector pills: one per unit polled by the server over PJLink; dot = green on+HDMI1, amber warming/cooling or a
+   missed poll (LAN reboots ~47 s after power-on), red error/wrong input/unreachable, grey standby */
+#pj{display:inline-flex;gap:6px;flex-wrap:wrap}
+.pj{font-size:12px;line-height:1.5;padding:0 8px 0 7px;border-radius:10px;border:1px solid #444;color:#999;background:#1a1a1e;white-space:nowrap;cursor:default}
+.pj::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:#666;margin-right:5px;vertical-align:1px}
+.pj.ok{color:#bdb}.pj.ok::before{background:#4c4;box-shadow:0 0 5px #4c4}
+.pj.warn{color:#edb}.pj.warn::before{background:#e93;box-shadow:0 0 5px #e93}
+.pj.bad{color:#ecc;border-color:#733}.pj.bad::before{background:#e44;box-shadow:0 0 5px #e44}
+/* the projectors are on another page (the Christmas control page steers them, nav.js): say so, offer the way back */
+#away{font-size:12px;color:#edb}
+#away button{padding:1px 8px;font-size:12px;margin-left:4px;border-radius:8px}
+header a{font-size:12px;color:#8a8}
+.hint{font-size:12px;color:#888;margin-left:auto}
+header kbd{font:11px ui-monospace,monospace;background:#2a2a2e;border:1px solid #555;border-radius:4px;padding:0 4px}
+@media (max-width:759px){.hint{display:none}}
+main{display:grid;min-height:0;gap:8px;grid-template-rows:auto auto minmax(0,1fr)}
+#vis{display:contents}
+/* eyes preview: keeps the two-door aspect, capped so it never eats the screen */
+#previewWrap{display:flex;justify-content:center;align-items:center;min-height:0}
+#preview{width:min(100%,calc(24dvh * 18.4 / 7));aspect-ratio:18.4/7;border:1px solid #444;border-radius:8px;background:#000;pointer-events:none;display:block}
+/* [tab] pad | tracker camera. The pad and the camera frame are identical 16:9 boxes: each box is as tall as the
+   camera is when it fills its half of the row (capped by height). The collapse tab is a fixed-size pill in a
+   24px gutter on the left edge; collapsing hides the pad column and leaves the camera the same size. */
+#row{display:grid;grid-template-columns:24px 1fr 1fr;gap:8px;container-type:inline-size;min-height:0;align-content:start;align-items:center}
+.box{position:relative;container-type:size;height:min(calc((100cqw - 24px - 16px) / 2 * 9 / 16),34dvh);min-width:0;display:flex;align-items:flex-start;justify-content:center}
+#row.noPad{grid-template-columns:24px 1fr}
+#row.noPad #padBox{display:none}
+#padToggle{width:22px;height:64px;padding:0;border-radius:11px;font-size:16px;line-height:1;color:#bbb;justify-self:start}
+#pad{width:min(100%,calc(100cqh * 16 / 9));aspect-ratio:16/9;background:#26262b;border:2px solid #666;border-radius:8px;cursor:crosshair;touch-action:none;position:relative}
+#pad:focus-visible{outline:2px solid #e83}
+#dot{position:absolute;width:18px;height:18px;border-radius:50%;background:#e33;transform:translate(-50%,-50%);pointer-events:none;display:none}
+#seen{position:absolute;width:14px;height:14px;border-radius:50%;background:#2cf;box-shadow:0 0 8px #2cf;transform:translate(-50%,-50%);pointer-events:none;display:none}
+.cap{position:absolute;left:6px;right:6px;bottom:6px;font-size:12px;line-height:1.3;pointer-events:none;text-shadow:0 0 3px #000,0 0 3px #000}
+#override{color:#e83;top:6px;bottom:auto}
+#motion{color:#2cf}
+#motion .old{color:#888}
+#camIn{position:relative;width:min(100%,calc(100cqh * 16 / 9));aspect-ratio:16/9;background:#000;border:1px solid #444;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+#cam{width:100%;height:100%;object-fit:contain;display:none}
+#camOff{color:#666;font-size:13px;text-align:center;padding:8px}
+#padHint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#666;font-size:13px;pointer-events:none}
+#pad.aimed #padHint{display:none}
+/* buttons */
+#ctl{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px}
+button{position:relative;padding:11px 6px;font-size:14px;background:#2a2a2e;color:#eee;border:1px solid #555;border-radius:10px;touch-action:manipulation;cursor:pointer;font-family:inherit}
+button.primary{background:#5a2020;border-color:#a44}
+button:active,button.flash{background:#555;border-color:#aaa}
+button.primary:active,button.primary.flash{background:#a33}
+button.on{background:#1f3a2a;border-color:#4a8}
+button.blanked{background:#3a1c1c;border-color:#a44}
+button kbd{position:absolute;top:2px;right:5px;font:11px ui-monospace,monospace;color:#999;background:none}
+h3{font-size:12px;font-weight:500;color:#888;margin:2px 0 -2px;text-transform:uppercase;letter-spacing:.06em}
+details{font-size:13px;color:#aaa}
+details summary{cursor:pointer;padding:4px 0}
+details button{padding:7px 8px;font-size:13px;margin:4px 4px 0 0}
+details .note{margin:6px 0 0}
+#vol,.vol{display:flex;align-items:center;gap:8px;font-size:12px;color:#888}
+#vol input,.vol input{flex:1;min-width:0;accent-color:#4a8}
+#vol.muted{opacity:.45}
+#mon{display:flex;align-items:center;gap:6px;font-size:12px;color:#888;cursor:pointer}
+#mon input{accent-color:#4a8}
+#np{font-size:13px;color:#aaa;line-height:1.45;min-height:2.9em}
+#np b{color:#fc6;font-weight:600}
+#np b.soft{color:#8cf}
+#np .old{color:#777;font-size:12px}
+#pool button.playing,#rumbles button.playing,#effects button.playing{background:#5a4a20;border-color:#fc6}
+.timing input{width:3.6em;background:#1c1c20;color:#eee;border:1px solid #555;border-radius:6px;padding:3px 4px;font:inherit}
+/* wide (laptop / landscape tablet): visuals left, buttons in a side column */
+@media (min-width:760px){
+  main{grid-template-columns:minmax(0,1fr) 250px;grid-template-rows:minmax(0,1fr)}
+  #vis{display:grid;grid-template-rows:auto minmax(0,1fr);gap:8px;min-height:0}
+  #preview{width:min(100%,calc(34dvh * 18.4 / 7))}
+  .grid{grid-template-columns:1fr 1fr}
+  #ctl{padding-right:2px}
+}
+/* short screens (phone sideways): same side-column layout, smaller preview, no key hint */
+@media (max-height:480px){
+  .hint{display:none}
+  #preview{width:min(100%,calc(28dvh * 18.4 / 7))}
+}
+</style></head>
+<body>
+<header>
+  <h1>Garage Eyes</h1>
+  <span id="status" class="off">relay: connecting…</span>
+  <span id="pj" title="projector status, polled by the server over PJLink"></span>
+  <span id="away" hidden>projectors are not showing the eyes <button onclick="backToEyes()">Back to eyes</button></span>
+  <a href="xmas-control.html" title="the Christmas doors have their own control page">Christmas ›</a>
+  <span class="hint">keys: <kbd>W</kbd> wake · <kbd>S</kbd> sleep · <kbd>Q</kbd> squint · <kbd>←→↑↓</kbd> aim · <kbd>⇧</kbd>+arrow far · <kbd>1–9</kbd>/<kbd>U</kbd>/<kbd>T</kbd>/<kbd>L</kbd> style · <kbd>0</kbd> eyes off · <kbd>H</kbd> glow · <kbd>G</kbd> growl · <kbd>R</kbd> rumble · <kbd>V</kbd> sound</span>
+</header>
+<main>
+<div id="vis">
+  <div id="previewWrap"><iframe id="preview" src="index.html?eye=both" tabindex="-1" title="live preview of the eyes (same relay feed as the projectors)"></iframe></div>
+  <div id="row">
+    <button id="padToggle" title="show / hide the aim pad (arrow keys still aim while hidden)">‹</button>
+    <div class="box" id="padBox"><div id="pad" tabindex="0" title="drag to aim (arrow keys nudge)"><div id="padHint">drag to aim · arrows nudge</div><div id="dot"></div><div id="seen"></div></div></div>
+    <div class="box" id="camBox"><div id="camIn"><img id="cam" alt="tracker camera" title="tracker view: zones, detections, target"><div id="camOff">tracker camera offline</div><div id="override" class="cap"></div><div id="motion" class="cap">no motion seen yet</div></div></div>
+  </div>
+</div>
+<div id="ctl">
+  <h3>Actions</h3><div class="grid" id="actions"></div>
+  <label id="vol" title="wake growl level on every eye page opened with ?sound=1 (the projector's own volume still applies)">Growl <input id="volume" type="range" min="0" max="1" step="0.05" value="1"><span id="volPct">100%</span></label>
+  <label id="vol2" class="vol" title="level of the soft searching sounds (purrs, breaths) relative to the growls">Purr <input id="softVolume" type="range" min="0" max="1" step="0.05" value="0.6"><span id="softPct">60%</span></label>
+  <div id="np" title="every sound the brain sends to the eyes, newest first">no sound played yet</div>
+  <label id="mon" title="also play every growl on this device (remembered per browser). The eyes only growl on pages opened with ?sound=1; this is for hearing what they are doing from the phone / laptop."><input id="monitor" type="checkbox"> hear growls on this device</label>
+  <h3>Style</h3><div class="grid" id="styles"></div>
+  <details open><summary>Sounds: pools + timing</summary>
+    <p class="note" id="poolNote"></p><div id="pool"></div>
+    <p class="note">After the growl: a sniff first (the eyes squint), then these in rotation, played quieter.</p><div id="rumbles"></div>
+    <p class="note" id="fxNote">On demand only (never picked by the brain):</p><div id="effects"></div>
+    <p class="note timing">a visit starts with a growl at most every <input id="tGrowl" type="number" min="0" max="600" step="1"> s<br>extra growls on a target: <input id="tBurstN" type="number" min="0" max="10" step="1">, <input id="tBurstMin" type="number" min="0" max="600" step="0.5">–<input id="tBurstMax" type="number" min="0" max="600" step="0.5"> s apart<br>then a soft sound every <input id="tRumMin" type="number" min="0" max="600" step="1">–<input id="tRumMax" type="number" min="0" max="600" step="1"> s (0 = off)</p>
+  </details>
+  <details><summary>Eye windows</summary>
+    <p>Preview (camera view, same left/right as the tracker frame and the aim pad):
+    <button onclick="openEye('left')">Left</button><button onclick="openEye('right')">Right</button><button onclick="openEye('both')">Both</button></p>
+    <p>Project (street view, <code>?mirror=1</code>: gaze x flipped so the eyes look toward the visitor as seen from the street):
+    <button onclick="openEye('left', true)">Left</button><button onclick="openEye('right', true)">Right</button><button onclick="openEye('both', true)">Both</button></p>
+    <span id="wins"></span>
+    <p class="note">Press <b>f</b> in an eye window for fullscreen. Eyes opened some other way are only reachable when served over http (relay / BroadcastChannel).</p>
+  </details>
+</div>
+</main>
+<script src="growl.js"></script>
+<script>
+// ---- outgoing: WebSocket relay (served over http) + BroadcastChannel + opened windows ----
+let bc = null; try { bc = new BroadcastChannel('garage-eyes'); } catch {}
+let ws = null;
+const statusEl = document.getElementById('status');
+const setStatus = (t, ok) => { statusEl.textContent = t; statusEl.className = ok ? '' : 'off'; };
+if (location.protocol.startsWith('http')) {
+  const connectWs = () => {
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+    ws.onopen = () => setStatus('relay: connected', true);
+    ws.onmessage = e => { try { seen(JSON.parse(e.data)); } catch {} };
+    ws.onclose = () => { ws = null; setStatus('relay: reconnecting…', false); setTimeout(connectWs, 2000); };
+  };
+  connectWs();
+} else setStatus('file:// — controls only the windows opened below', false);
+const preview = document.getElementById('preview');
+const wins = {};
+const openEye = (which, mirror = false) => {
+  const key = which + (mirror ? '-proj' : '');
+  const w = window.open('index.html?eye=' + which + (mirror ? '&mirror=1' : ''), 'eye-' + key);
+  if (w) wins[key] = w;
+  setTimeout(() => { document.getElementById('wins').textContent = 'open: ' + Object.keys(wins).filter(k => wins[k] && !wins[k].closed).join(', '); }, 500);
+};
+const COOLDOWN = 5;                      // must match ?cooldown= on the eyes (default 5): sensors yield to manual control this long
+const MOTION_CMDS = new Set(['look', 'motion', 'wake', 'sleep']);   // same set as eye.js: only these take over from the tracker
+let lastManual = -1e9;
+const send = m => {
+  if (MOTION_CMDS.has(m.cmd)) { lastManual = Date.now(); renderOverride(); }
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(m));
+  if (bc) bc.postMessage(m);
+  if (!location.protocol.startsWith('http') && preview.contentWindow) preview.contentWindow.postMessage(m, '*');   // file:// has no relay
+  for (const k in wins) if (wins[k] && !wins[k].closed) wins[k].postMessage(m, '*');
+};
+
+// ---- aim: one place that moves the red dot and sends `look`, used by the pad, the arrow keys and the buttons ----
+const pad = document.getElementById('pad'), dot = document.getElementById('dot');
+const cur = { x: 0, y: 0 };
+const clampU = v => Math.max(-1, Math.min(1, v));
+let lastAim = 0;
+const look = (x, y, hold = 4, force = false) => {
+  cur.x = clampU(x); cur.y = clampU(y);
+  dot.style.display = 'block'; pad.classList.add('aimed');
+  dot.style.left = ((cur.x + 1) / 2 * 100) + '%'; dot.style.top = ((cur.y + 1) / 2 * 100) + '%';
+  const now = performance.now();
+  if (force || now - lastAim > 40) { send({ cmd: 'look', x: cur.x, y: cur.y, hold }); lastAim = now; }   // drag throttled to ~25/s
+};
+
+// ---- buttons + keyboard, from one table so the key labels can't drift ----
+let halo = false;   // background glow around the eyes; eyes default to pure black so the projection edge disappears on the door
+let sound = true, volume = 1, softVolume = 0.6;   // wake growl on the ?sound=1 eye pages: mute + level live in the relay brain, so every controller agrees
+let blank = false;  // eyes off: projectors show solid black; tracking, sleep/wake and the style keep running underneath
+// [name, key] — same map as eye.js STYLE_KEYS (digits ran out at nine: U = hUman, T = Tiku, L = haL; 0 is the eyes-off toggle)
+const STYLES = [['monster', '1'], ['dragon', '2'], ['ghost', '3'], ['ghoul', '4'], ['demon', '5'], ['cat', '6'], ['hypno', '7'], ['sauron', '8'], ['jack', '9'], ['human', 'u'], ['tiku', 't'], ['hal', 'l']];
+const ACTIONS = [
+  { key: 'm', label: 'Motion!', primary: true, run: () => send({ cmd: 'motion' }) },
+  { key: 'w', label: 'Wake',   run: () => send({ cmd: 'wake' }) },
+  { key: 's', label: 'Sleep',  run: () => send({ cmd: 'sleep' }) },
+  { key: ' ', show: 'space', label: 'Blink', run: () => send({ cmd: 'blink' }) },
+  { key: 'c', label: 'Center', run: () => look(0, 0, 4, true) },
+  { key: 'ArrowLeft',  shift: true, show: '⇧←', label: 'Far left',  run: () => look(-1, 0, 5, true) },
+  { key: 'ArrowRight', shift: true, show: '⇧→', label: 'Far right', run: () => look(1, 0, 5, true) },
+  { key: 'q', label: 'Squint', run: () => send({ cmd: 'mood', name: 'squint' }) },
+  { key: 'e', label: 'Wide',   run: () => send({ cmd: 'mood', name: 'wide' }) },
+  { key: 'n', label: 'Normal', run: () => send({ cmd: 'mood', name: 'normal' }) },
+  { key: 'a', label: 'Auto on',  run: () => send({ cmd: 'auto', on: true }) },
+  { key: 'a', shift: true, show: '⇧A', label: 'Auto off', run: () => send({ cmd: 'auto', on: false }) },
+  { key: 'h', label: 'Glow off', toggle: 'halo', run: function () { halo = !halo; send({ cmd: 'halo', on: halo }); this.btn.firstChild.textContent = halo ? 'Glow on' : 'Glow off'; this.btn.classList.toggle('on', halo); } },
+  { key: '0', label: 'Eyes off', toggle: 'blank', title: 'blank the projectors (solid black); tracking, sleep/wake and the style keep running underneath',
+    run: function () { blank = !blank; send({ cmd: 'blank', on: blank }); this.btn.firstChild.textContent = blank ? 'Eyes on' : 'Eyes off'; this.btn.classList.toggle('blanked', blank); } },
+  { key: 'g', label: 'Growl', title: 'play the wake growl now on every eye page opened with ?sound=1', run: () => growl() },
+  { key: 'r', label: 'Rumble', title: 'play the soft searching rumble now (the brain sends one every so often while the eyes are awake)', run: () => growl(null, true) },
+  { key: 'v', label: 'Sound on', toggle: 'sound', title: 'mute / unmute the wake growl (the eyes growl as they open on a person, at most every GROWL_EVERY seconds)',
+    run: function () { sound = !sound; send({ cmd: 'sound', on: sound, volume }); renderSound(); } },
+  ...STYLES.map(([name, key]) => ({ key, label: name[0].toUpperCase() + name.slice(1), style: true, run: () => send({ cmd: 'style', name }) })),
+];
+const flash = btn => { btn.classList.add('flash'); setTimeout(() => btn.classList.remove('flash'), 160); };
+for (const a of ACTIONS) {
+  const b = document.createElement('button');
+  b.innerHTML = `${a.label}<kbd>${a.show || a.key.toUpperCase()}</kbd>`;
+  if (a.primary) b.className = 'primary';
+  b.addEventListener('click', () => { a.run(); b.blur(); });
+  if (a.toggle === 'halo') b.title = 'toggle the soft glow around the eyes (off = pure black background, best for projection)';   // blur so Space/Enter afterwards don't re-fire the button
+  if (a.title) b.title = a.title;
+  a.btn = b;
+  document.getElementById(a.style ? 'styles' : 'actions').appendChild(b);
+}
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.closest && e.target.closest('input,textarea,select')) return;
+  const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (arrow && !e.shiftKey) {                    // plain arrow: nudge (auto-repeat sweeps)
+    e.preventDefault(); look(cur.x + arrow[0] * 0.25, cur.y + arrow[1] * 0.25, 5, true); return;
+  }
+  if (arrow && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); if (!e.repeat) look(cur.x, arrow[1], 5, true); return; }
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  const a = ACTIONS.find(a => a.key === key && !!a.shift === e.shiftKey);
+  if (!a) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  a.run(); flash(a.btn);
+});
+const volEl = document.getElementById('volume'), softEl = document.getElementById('softVolume');
+const renderSound = () => {
+  const a = ACTIONS.find(a => a.toggle === 'sound');
+  a.btn.firstChild.textContent = sound ? 'Sound on' : 'Sound off'; a.btn.classList.toggle('on', sound);
+  volEl.value = volume; document.getElementById('volPct').textContent = Math.round(volume * 100) + '%';
+  softEl.value = softVolume; document.getElementById('softPct').textContent = Math.round(softVolume * 100) + '%';
+  document.getElementById('vol').classList.toggle('muted', !sound);
+};
+volEl.addEventListener('input', () => { volume = +volEl.value; send({ cmd: 'sound', on: sound, volume }); renderSound(); });
+softEl.addEventListener('input', () => { softVolume = +softEl.value; send({ cmd: 'sound', on: sound, volume, softVolume }); renderSound(); });
+softEl.addEventListener('change', () => softEl.blur());
+volEl.addEventListener('change', () => volEl.blur());   // give the keyboard back to the action keys
+renderSound();
+// monitor: this page is not an eye, so it stays silent unless asked. Ticking the box is the user gesture Safari / iOS insist on
+// before an AudioContext may run, and it answers with a growl so you know it took.
+const monEl = document.getElementById('monitor');
+let monitor = false; try { monitor = localStorage.getItem('growlMonitor') === '1'; } catch {}
+let pool = [], rumbles = [], effects = [];
+monEl.checked = monitor; if (monitor) Growl.init();
+// now playing: every growl message names its file (no file = the synth), so show it — you cannot judge a pool you cannot name
+const played = [];
+const soundName = m => (m.file ? m.file.replace(/^sounds\/(rumble-|fx-)?/, '').replace(/\.\w+$/, '') : m.voice || 'synth');
+const renderNp = () => { if (!played.length) return; const [cur, ...old] = played;
+  document.getElementById('np').innerHTML = `▶ <b class="${cur.soft ? 'soft' : ''}">${cur.name}</b> ${cur.soft ? 'purr' : 'GROWL'}${sound ? '' : ' (muted)'} · ${ago(cur.t)}` +
+    (old.length ? `<br><span class="old">before: ${old.map(p => p.name + (p.soft ? '' : '!')).join(' · ')}</span>` : ''); };
+const nowPlaying = m => { const p = { name: soundName(m), soft: !!m.soft, t: Date.now() }; played.unshift(p); played.length = Math.min(played.length, 7); renderNp();
+  for (const b of document.querySelectorAll('#pool button, #rumbles button, #effects button')) if (b.dataset.file === (m.file || m.voice || 'synth') && (b.parentNode.id === 'rumbles') === p.soft) { b.classList.add('playing'); setTimeout(() => b.classList.remove('playing'), 3000); } };
+setInterval(renderNp, 1000);
+let lastHeard = 0;   // the same growl can arrive twice (relay + BroadcastChannel from another controller tab)
+const hear = (soft, file, voice) => { if (!monitor || !sound || volume <= 0 || Date.now() - lastHeard < 300) return; lastHeard = Date.now(); Growl.play({ gain: volume * (soft ? softVolume : 1), soft: !!soft, file, voice }); };
+// wake growl test: over the relay the brain picks the file (or takes the one named) and echoes it back to us too; with no relay
+// (file://) nobody echoes, so play it here
+const growl = (file, soft) => { const m = { cmd: 'growl' }; if (soft) m.soft = true; if (file) m.file = file; send(m); if (!(ws && ws.readyState === 1)) hear(soft, /^sounds\//.test(file || '') ? file : undefined, file === 'sniff' ? 'sniff' : undefined); };
+const renderPool = () => {
+  const fill = (id, files, soft) => { const el = document.getElementById(id); el.textContent = '';
+    for (const f of files) { const b = document.createElement('button'); b.textContent = f.replace(/^sounds\/(rumble-|fx-)?/, '').replace(/\.\w+$/, ''); b.dataset.file = f; b.title = 'play ' + f + ' on the eyes'; b.onclick = () => { growl(f, soft); b.blur(); }; el.appendChild(b); } };
+  fill('pool', pool, false); fill('rumbles', ['synth', 'sniff', ...rumbles], true); fill('effects', effects, false);
+  document.getElementById('fxNote').hidden = !effects.length;
+  document.getElementById('poolNote').textContent = pool.length ? 'Wake + on a target: the brain picks one at random, never the same twice running.' : 'No wake samples in eyes/sounds/: the synth stands in.';
+  if (monitor) Growl.preload([...pool, ...rumbles, ...effects]); };
+// timing lives in the brain too; the boxes send on change and follow sync / other controllers
+const timing = { growlEvery: 20, rumble: [6, 10], burst: [0, 4, 7] };
+const tEls = ['tGrowl', 'tRumMin', 'tRumMax', 'tBurstN', 'tBurstMin', 'tBurstMax'].map(id => document.getElementById(id));
+const renderTiming = () => { const v = [timing.growlEvery, timing.rumble[0], timing.rumble[1], ...timing.burst]; tEls.forEach((el, i) => { if (document.activeElement !== el) el.value = v[i]; }); };
+for (const el of tEls) el.addEventListener('change', () => { const [g, a, b, n, c, d] = tEls.map(e => Math.max(0, +e.value || 0));
+  timing.growlEvery = g; timing.rumble = [a, Math.max(a, b)]; timing.burst = [Math.round(n), c, Math.max(c, d)];
+  send({ cmd: 'sound', on: sound, volume, growlEvery: g, rumble: timing.rumble, burst: timing.burst }); el.blur(); renderTiming(); });
+monEl.addEventListener('change', () => { monitor = monEl.checked; try { localStorage.setItem('growlMonitor', monitor ? '1' : '0'); } catch {}
+  if (monitor) { Growl.unlock(); Growl.preload([...pool, ...rumbles, ...effects]); growl(); } monEl.blur(); });
+// `this` inside run() must be the action for the toggle button, so bind each run once
+for (const a of ACTIONS) a.run = a.run.bind(a);
+
+// ---- projectors on another page? The Christmas control page (xmas-control.html) steers the kiosk windows with `navigate`;
+// the server keeps the page per output (sync.pages). Anything but the eyes page gets a notice and a way back. ----
+const EYES_URL = 'index.html?eye={out}&mirror=1';
+const pages = { left: null, right: null };
+const renderAway = () => { document.getElementById('away').hidden = ['left', 'right'].every(o => !pages[o] || pages[o].startsWith('index.html')); };
+const backToEyes = () => { send({ cmd: 'navigate', out: 'all', url: EYES_URL }); pages.left = pages.right = EYES_URL; renderAway(); };   // the relay doesn't echo to the sender
+
+// ---- incoming motion / look from the tracker, Protect bridge, or other controllers ----
+const seenDot = document.getElementById('seen'), motionEl = document.getElementById('motion');
+const last = { look: null, motion: null };
+const seen = m => {
+  if (m.cmd === 'sync') {   // relay's current state on connect: keep the toggle buttons honest
+    if (m.halo !== undefined) { const a = ACTIONS.find(a => a.toggle === 'halo');
+      halo = !!m.halo; a.btn.firstChild.textContent = halo ? 'Glow on' : 'Glow off'; a.btn.classList.toggle('on', halo); }
+    if (m.blank !== undefined) { const a = ACTIONS.find(a => a.toggle === 'blank');
+      blank = !!m.blank; a.btn.firstChild.textContent = blank ? 'Eyes on' : 'Eyes off'; a.btn.classList.toggle('blanked', blank); }
+    if (Array.isArray(m.sounds)) { const ok = f => /^sounds\/[\w.-]+$/.test(f); pool = m.sounds.filter(ok); rumbles = (m.rumbles || []).filter(ok); effects = (m.effects || []).filter(ok); renderPool(); }
+    if (m.sound !== undefined) { sound = !!m.sound; if (typeof m.volume === 'number') volume = m.volume; if (typeof m.softVolume === 'number') softVolume = m.softVolume; renderSound(); }
+  }
+  if (m.cmd === 'sync' || m.cmd === 'sound') { if (typeof m.growlEvery === 'number') timing.growlEvery = m.growlEvery; if (Array.isArray(m.rumble)) timing.rumble = m.rumble.map(Number); if (Array.isArray(m.burst)) timing.burst = m.burst.map(Number); renderTiming(); }
+  if (m.cmd === 'growl') nowPlaying(m);
+  if (m.cmd === 'growl') hear(m.soft, typeof m.file === 'string' && (pool.includes(m.file) || rumbles.includes(m.file) || effects.includes(m.file)) ? m.file : undefined, m.voice === 'sniff' ? 'sniff' : undefined);   // the brain's wake growl, or another controller's test
+  if (m.cmd === 'sound') { sound = !!m.on; if (typeof m.volume === 'number') volume = m.volume; if (typeof m.softVolume === 'number') softVolume = m.softVolume; renderSound(); }   // another controller moved it
+  if (m.projectors) { pjs = m.projectors; pjAt = Date.now(); renderPj(); }   // sync on connect, then every server poll
+  if (m.cmd === 'sync') { Object.assign(pages, { left: null, right: null }, m.pages); renderAway(); }
+  if (m.cmd === 'navigate' && typeof m.url === 'string') { for (const o of (m.out === 'left' || m.out === 'right' ? [m.out] : ['left', 'right'])) pages[o] = m.url; renderAway(); }
+  if (m.src === 'brain') return;   // the relay's own idle saccades/blinks/sync; only show sensor & controller activity
+  const t = Date.now();
+  if (m.cmd === 'look') { last.look = { t, x: +m.x || 0, y: +m.y || 0, src: m.src || 'controller', zone: m.zone };
+    seenDot.style.display = 'block'; seenDot.style.left = ((last.look.x + 1) / 2 * 100) + '%'; seenDot.style.top = ((last.look.y + 1) / 2 * 100) + '%'; }
+  else if (m.cmd === 'motion' || m.cmd === 'wake') last.motion = { t, src: m.src || 'controller', zones: m.zones };
+  renderSeen();
+};
+if (bc) bc.onmessage = e => seen(e.data);
+const ago = t => { const s = (Date.now() - t) / 1000; return s < 60 ? s.toFixed(0) + 's ago' : Math.floor(s / 60) + 'm ago'; };
+const renderSeen = () => {
+  const parts = [];
+  if (last.look) { const l = last.look, stale = Date.now() - l.t > 3000;
+    parts.push(`<span class="${stale ? 'old' : ''}">${l.src}: look ${l.x.toFixed(2)}, ${l.y.toFixed(2)}${l.zone ? ' in ' + l.zone : ''} · ${ago(l.t)}</span>`);
+    seenDot.style.opacity = stale ? 0.3 : 1; }
+  if (last.motion) { const m = last.motion, stale = Date.now() - m.t > 10000;
+    parts.push(`<span class="${stale ? 'old' : ''}">${m.src}: motion${m.zones && m.zones.length ? ' in ' + m.zones.join(', ') : ''} · ${ago(m.t)}</span>`); }
+  if (parts.length) motionEl.innerHTML = parts.join('<br>');
+};
+const renderOverride = () => {
+  const left = COOLDOWN - (Date.now() - lastManual) / 1000;
+  document.getElementById('override').textContent = left > 0 ? `manual override ${left.toFixed(0)}s — sensors ignored` : '';
+};
+setInterval(renderSeen, 1000); setInterval(renderOverride, 250);
+
+// ---- projector pills: the server's last PJLink answer per unit, aged locally between polls ----
+// Built with textContent (power/input strings come off a socket from the projector, never trusted as markup).
+const pjEl = document.getElementById('pj'); let pjs = null, pjAt = 0;
+const renderPj = () => {
+  if (!pjs) return;
+  const drift = (Date.now() - pjAt) / 1000;
+  pjEl.replaceChildren(...pjs.map(p => {
+    const age = p.age == null ? null : p.age + drift;
+    let cls = '', text;
+    if (age == null) { cls = 'bad'; text = 'unreachable'; }
+    else if (age > 30) { cls = age > 90 ? 'bad' : 'warn'; text = `no answer ${Math.round(age)}s`; }   // one missed poll is normal after power-on
+    else if (p.errors && p.errors.length) { cls = 'bad'; text = p.errors.join(', '); }
+    else if (p.power === 'on') { if (p.input === 'HDMI1') { cls = 'ok'; text = 'on'; } else { cls = 'bad'; text = 'on · ' + (p.input || '?'); } }
+    else if (p.power === 'warming' || p.power === 'cooling') { cls = 'warn'; text = p.power; }
+    else text = p.power || '…';
+    const el = document.createElement('span');
+    el.className = 'pj ' + cls;
+    el.textContent = `${p.name} ${text}`;
+    el.title = [p.host, p.power && `power ${p.power}`, p.input && `input ${p.input}`, p.lamp && `lamp ${p.lamp} h`,
+                p.errors && p.errors.length ? 'errors ' + p.errors.join(', ') : 'no errors',
+                age == null ? 'never answered' : `answered ${Math.round(age)}s ago`, p.error && `last error: ${p.error}`].filter(Boolean).join(' · ');
+    return el;
+  }));
+};
+setInterval(renderPj, 1000);
+
+// ---- live tracker frame (annotated by the tracker service; same origin when served behind the proxy) ----
+const cam = document.getElementById('cam'), camOff = document.getElementById('camOff'); let camDelay = 700;
+const refreshCam = () => {
+  if (document.hidden) return setTimeout(refreshCam, 1000);
+  const im = new Image();
+  im.onload = () => { cam.src = im.src; cam.style.display = 'block'; camOff.style.display = 'none'; camDelay = 700; setTimeout(refreshCam, camDelay); };
+  im.onerror = () => { cam.style.display = 'none'; camOff.style.display = 'block'; camDelay = Math.min(camDelay * 2, 15000); setTimeout(refreshCam, camDelay); };
+  im.src = '/tracker/frame.jpg?' + Date.now();
+};
+if (location.protocol.startsWith('http')) refreshCam();
+
+// ---- drag pad (collapsible; the choice sticks per browser) ----
+const row = document.getElementById('row'), padToggle = document.getElementById('padToggle');
+const setPad = show => {
+  row.classList.toggle('noPad', !show);
+  padToggle.textContent = show ? '‹' : '›';
+  try { localStorage.setItem('padShown', show ? '1' : '0'); } catch {}
+};
+let padShown = true; try { padShown = localStorage.getItem('padShown') !== '0'; } catch {}
+setPad(padShown);
+padToggle.addEventListener('click', () => { setPad(row.classList.contains('noPad')); padToggle.blur(); });
+let down = false;
+const aim = e => {
+  const r = pad.getBoundingClientRect();
+  look(((e.clientX - r.left) / r.width) * 2 - 1, ((e.clientY - r.top) / r.height) * 2 - 1, 4);
+};
+pad.addEventListener('pointerdown', e => { down = true; pad.setPointerCapture(e.pointerId); aim(e); e.preventDefault(); });
+pad.addEventListener('pointermove', e => { if (down) { aim(e); e.preventDefault(); } });
+addEventListener('pointerup', () => down = false);
+addEventListener('pointercancel', () => down = false);
+</script>
+</body></html>

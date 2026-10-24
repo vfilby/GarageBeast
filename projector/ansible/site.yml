@@ -1,0 +1,326 @@
+# Provision the garage-eyes projector host (Raspberry Pi 5, Raspberry Pi OS 64-bit desktop).
+# Two HDMI outputs, one Chromium kiosk per projector, displays pinned on regardless of
+# projector power state, logs in RAM, nightly browser refresh, unattended security updates.
+#
+#   ./provision.sh            # full run
+#   ./provision.sh --check    # dry run
+---
+- name: Eye-slinger projector kiosk
+  hosts: eye_slinger
+  become: true
+
+  vars:
+    kiosk_user: vfilby
+    kiosk_session: eye-slinger
+    # Casio XJ-F211WN is WXGA native. Both outputs get the same fixed mode.
+    kiosk_width: 1280
+    kiosk_height: 800
+    kiosk_refresh: 60
+    eyes_base: https://eyes.example.com/index.html
+    # x_output is the Xorg name (xrandr), kms is the kernel connector name (cmdline video=).
+    # Swap the eye= values if the projectors end up on the other doors.
+    outputs:
+    # sound=1 on ONE output only: both Chromiums play into the same default sink, and two growls a few ms apart comb-filter.
+      - { name: left,  x_output: HDMI-1, kms: HDMI-A-1, url: "{{ eyes_base }}?eye=left&mirror=1&sound=1" }
+      - { name: right, x_output: HDMI-2, kms: HDMI-A-2, url: "{{ eyes_base }}?eye=right&mirror=1" }
+    refresh_time: "04:00"      # daily Chromium restart (systemd OnCalendar)
+    boot_cmdline: /boot/firmware/cmdline.txt
+    metrics_scraper: <prometheus-host-ip>  # the Prometheus host: the only address the node exporter answers besides localhost
+    forced_video: "{{ outputs | map(attribute='kms') | map('regex_replace', '^(.*)$', 'video=\\1:' ~ kiosk_width ~ 'x' ~ kiosk_height ~ '@' ~ kiosk_refresh ~ 'D') | join(' ') }}"
+
+  tasks:
+    # The Trixie Imager image does not grant NOPASSWD; first run needs --ask-become-pass
+    # (or -e ansible_become_password=...), after which this makes later runs hands-free.
+    - name: Passwordless sudo for the kiosk user
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/010-{{ kiosk_user }}-nopasswd
+        content: "{{ kiosk_user }} ALL=(ALL) NOPASSWD: ALL\n"
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Packages
+      ansible.builtin.apt:
+        name:
+          - chromium
+          - xserver-xorg
+          - xinit
+          - x11-xserver-utils
+          - unclutter
+          - unattended-upgrades
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # ---- displays pinned on in the kernel -------------------------------------------
+    - name: Read boot cmdline
+      ansible.builtin.slurp:
+        path: "{{ boot_cmdline }}"
+      register: cmdline_raw
+
+    - name: Force both HDMI connectors on at a fixed mode (survives projector power cycles)
+      vars:
+        cmdline: "{{ (cmdline_raw.content | b64decode).strip() }}"
+        stripped: "{{ cmdline | regex_replace(' ?video=HDMI-A-[12]:[^ ]+', '') }}"
+      ansible.builtin.copy:
+        dest: "{{ boot_cmdline }}"
+        content: "{{ stripped }} {{ forced_video }}\n"
+        mode: "0755"
+      when: forced_video not in (cmdline_raw.content | b64decode)
+      notify: reboot
+
+    # ---- kiosk X session -------------------------------------------------------------
+    - name: Kiosk session script
+      ansible.builtin.template:
+        src: kiosk-session.sh.j2
+        dest: /usr/local/bin/{{ kiosk_session }}-session
+        mode: "0755"
+      notify: restart lightdm
+
+    - name: Register the session with the display manager
+      ansible.builtin.copy:
+        dest: /usr/share/xsessions/{{ kiosk_session }}.desktop
+        mode: "0644"
+        content: |
+          [Desktop Entry]
+          Name=Eye-slinger kiosk
+          Comment=Two Chromium kiosks, one per projector
+          Exec=/usr/local/bin/{{ kiosk_session }}-session
+          Type=Application
+      notify: restart lightdm
+
+    - name: LightDM autologin straight into the kiosk session
+      community.general.ini_file:
+        path: /etc/lightdm/lightdm.conf
+        section: "Seat:*"
+        option: "{{ item.key }}"
+        value: "{{ item.value }}"
+        no_extra_spaces: true
+        mode: "0644"
+      loop:
+        - { key: autologin-user, value: "{{ kiosk_user }}" }
+        - { key: autologin-user-timeout, value: "0" }
+        - { key: autologin-session, value: "{{ kiosk_session }}" }
+        - { key: user-session, value: "{{ kiosk_session }}" }
+      notify: restart lightdm
+
+    - name: Boot to graphical target
+      ansible.builtin.file:
+        src: /usr/lib/systemd/system/graphical.target
+        dest: /etc/systemd/system/default.target
+        state: link
+
+    - name: Kiosk user is in the video/render/input groups
+      ansible.builtin.user:
+        name: "{{ kiosk_user }}"
+        groups: [video, render, input, audio]
+        append: true
+
+    # ---- nightly browser refresh -----------------------------------------------------
+    - name: Refresh service (kills Chromium; the session loop relaunches it)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ kiosk_session }}-refresh.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Restart the eye-slinger kiosk browsers
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/pkill -x chromium
+          SuccessExitStatus=1
+
+    - name: Refresh timer
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/{{ kiosk_session }}-refresh.timer
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Nightly eye-slinger browser refresh
+
+          [Timer]
+          OnCalendar=*-*-* {{ refresh_time }}:00
+          Persistent=false
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: Enable refresh timer
+      ansible.builtin.systemd:
+        name: "{{ kiosk_session }}-refresh.timer"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # ---- logs in RAM (the SD card is the weak link) ----------------------------------
+    - name: journald drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Journal in RAM only
+      ansible.builtin.copy:
+        dest: /etc/systemd/journald.conf.d/volatile.conf
+        mode: "0644"
+        content: |
+          [Journal]
+          Storage=volatile
+          RuntimeMaxUse=32M
+      notify: restart journald
+
+    - name: Directories services expect under /var/log (recreated on every boot)
+      ansible.builtin.copy:
+        dest: /etc/tmpfiles.d/var-log.conf
+        mode: "0644"
+        content: |
+          d /var/log/apt 0755 root root -
+          d /var/log/private 0700 root root -
+          d /var/log/lightdm 0711 root root -
+          d /var/log/unattended-upgrades 0755 root root -
+
+    - name: /var/log on tmpfs
+      ansible.posix.mount:
+        path: /var/log
+        src: tmpfs
+        fstype: tmpfs
+        opts: defaults,noatime,nosuid,nodev,mode=0755,size=64m
+        state: present
+      notify: reboot
+
+    - name: No swap file
+      ansible.builtin.systemd:
+        name: dphys-swapfile
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    # ---- desktop-image services the kiosk never uses ---------------------------------
+    # The desktop image enables NFS client plumbing (rpcbind listens on :111 on the LAN), printing, mDNS and the
+    # Wayland VNC helper. The kiosk is X11 + Chromium + ssh; nothing mounts NFS, prints, or is reached as .local.
+    # Sockets and paths first, or stopping a service just lets its activation unit start it again.
+    # failed_when false: a future image may not ship some of these units.
+    - name: Unused desktop services are off
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      failed_when: false
+      loop:
+        - rpcbind.socket
+        - rpcbind.service
+        - nfs-blkmap.service
+        - cups.socket
+        - cups.path
+        - cups.service
+        - cups-browsed.service
+        - avahi-daemon.socket
+        - avahi-daemon.service
+        - wayvnc-control.service
+
+    # ---- unattended security updates, never auto-reboot -----------------------------
+    - name: Periodic apt
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
+
+    - name: Unattended-upgrades never reboots on its own
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/52eye-slinger
+        mode: "0644"
+        content: |
+          Unattended-Upgrade::Automatic-Reboot "false";
+          Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+    # ---- patch / version metrics for Grafana's "Host patch status" -------------------
+    # Same end state as the homelab monitoring repo's host-agent installer (which put it here first, 2026-09-21): the
+    # distro node exporter plus its apt collector on :9100, answering only the Prometheus host. "Periodic apt" above already
+    # refreshes the package lists daily, so the installer's own periodic file is not wanted here.
+    - name: Host agent packages
+      ansible.builtin.apt:
+        name:
+          - prometheus-node-exporter
+          - prometheus-node-exporter-collectors
+          - python3-apt
+          - moreutils
+        state: present
+        install_recommends: false
+
+    - name: Installer's periodic-apt file (covered by 20auto-upgrades)
+      ansible.builtin.file:
+        path: /etc/apt/apt.conf.d/10periodic-update-lists
+        state: absent
+
+    - name: Node exporter drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/prometheus-node-exporter.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Node exporter answers only the Prometheus host and localhost
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/prometheus-node-exporter.service.d/scraper-only.conf
+        mode: "0644"
+        content: |
+          # homelab host-agent installer
+          [Service]
+          IPAddressDeny=any
+          IPAddressAllow=localhost {{ metrics_scraper }}
+      notify: restart node exporter
+
+    - name: Node exporter and the apt collector timer are on
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - prometheus-node-exporter.service
+        - prometheus-node-exporter-apt.timer
+
+  handlers:
+    - name: restart node exporter
+      ansible.builtin.systemd:
+        name: prometheus-node-exporter
+        state: restarted
+        daemon_reload: true
+
+    - name: restart journald
+      ansible.builtin.systemd:
+        name: systemd-journald
+        state: restarted
+
+    - name: reboot
+      ansible.builtin.set_fact:
+        reboot_needed: true
+
+    - name: restart lightdm
+      ansible.builtin.systemd:
+        name: lightdm
+        state: restarted
+      when: not (reboot_needed | default(false))
+
+  post_tasks:
+    - name: Reboot to apply kernel cmdline / fstab changes
+      ansible.builtin.reboot:
+        msg: eye-slinger provisioning reboot
+        reboot_timeout: 300
+      when: reboot_needed | default(false)
+
+    - name: Wait for the kiosk to come up
+      ansible.builtin.shell: |
+        for i in $(seq 1 30); do
+          n=$(pgrep -c -x chromium || true)
+          [ "$n" -ge 2 ] && { echo "chromium processes: $n"; exit 0; }
+          sleep 2
+        done
+        echo "chromium not running"; exit 1
+      changed_when: false
+      register: kiosk_check
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ kiosk_check.stdout }}"

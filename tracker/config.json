@@ -1,0 +1,125 @@
+{
+  "fps": 10,
+  "conf": 0.35,
+  "classes": [
+    "person",
+    "bicycle"
+  ],
+  "min_height": 0.04,
+  "lost_after": 3.0,
+  "sticky_radius": 0.15,
+  "zones": [
+    {
+      "name": "driveway",
+      "poly": [
+        [
+          0.11,
+          1
+        ],
+        [
+          0.12,
+          0.78
+        ],
+        [
+          0.27,
+          0.28
+        ],
+        [
+          0.31,
+          0.24
+        ],
+        [
+          0.78,
+          0.27
+        ],
+        [
+          0.91,
+          0.29
+        ],
+        [
+          1,
+          0.45
+        ],
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "name": "street",
+      "poly": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          0.45
+        ],
+        [
+          0.91,
+          0.29
+        ],
+        [
+          0.78,
+          0.27
+        ],
+        [
+          0.31,
+          0.24
+        ],
+        [
+          0.27,
+          0.28
+        ],
+        [
+          0.12,
+          0.45
+        ],
+        [
+          0,
+          0.45
+        ]
+      ],
+      "conf": 0.25
+    }
+  ],
+  "ignore": [],
+  "gaze": {
+    "mirror": false,
+    "x_gain": 1.0,
+    "y_range": [
+      -0.35,
+      0.6
+    ],
+    "smooth": 0.5,
+    "deadband": 0.02,
+    "rate_hz": 10,
+    "hold": 2.0,
+    "keepalive": 1.0,
+    "squint_below": 0.35,
+    "conf_smooth": 0.3
+  },
+  "track_conf": 0.15,
+  "static_after": 5.0,
+  "static_radius": 0.02,
+  "static_expire": 60.0,
+  "static_margin": 0.1,
+  "motion": {
+    "enabled": true,
+    "min_area": 0.001,
+    "rate_hz": 2
+  },
+  "record": {
+    "enabled": true,
+    "fps": 5,
+    "preroll": 2.0,
+    "postroll": 2.0,
+    "max_mb": 500
+  }
+}

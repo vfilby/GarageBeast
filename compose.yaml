@@ -1,0 +1,76 @@
+# Deployed copy lives at the docker host's stack directory.
+# Stack .env: RTSP_URL, PROTECT_HOST, PROTECT_USER, PROTECT_PASS, CAMERA_ID (Protect camera object id),
+#             PJ_HOSTS, PJ_PASSWORD (projector status pills on the control page; see .env.example).
+services:
+  halloween-eyes:
+    image: node:22-alpine
+    container_name: halloween-eyes
+    restart: unless-stopped
+    working_dir: /app
+    command: node server.js
+    environment:
+      SLEEP_AFTER: "10"   # seconds without a person before the brain drops the eyes to slits
+      OFF_AFTER: "20"     # seconds without any motion before the slits fade to dark
+      COOLDOWN: "5"       # seconds tracker/protect commands are dropped after a manual (controller) command
+      GROWL_EVERY: "20"   # minimum seconds between wake growls (played by eye pages opened with ?sound=1)
+      RUMBLE: "6 10"      # awake, after the growl: a soft sound every 6-10 s (first = sniff + squint, then purrs / breaths); "0" = off
+      BURST: "0 4 7"      # extra growls while on a target: count, min-max s apart; 0 = one growl per wake
+      PJ_HOSTS: ${PJ_HOSTS:-}         # projectors polled over PJLink (TCP 4352) for the control page status pills; empty = off
+      PJ_PASSWORD: ${PJ_PASSWORD:-}   # = the projector web Admin password
+    volumes:
+      - ./site:/app:ro
+    networks:
+      - reverse-proxy-network
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.halloween-eyes.rule=Host(`eyes.example.com`)
+      - traefik.http.routers.halloween-eyes.entrypoints=websecure
+      - traefik.http.services.halloween-eyes.loadbalancer.server.port=8000
+
+  tracker:
+    build: ./tracker
+    image: halloween-tracker:local
+    container_name: halloween-tracker
+    restart: unless-stopped
+    environment:
+      RTSP_URL: ${RTSP_URL}
+      RELAY_URL: ws://halloween-eyes:8000
+      BASE_PATH: /tracker
+      ORT_THREADS: "2"
+    volumes:
+      - ./tracker/config.json:/app/config.json:ro
+      - ./tracker/tracker.py:/app/tracker.py:ro   # iterate without rebuilding
+      - ./events:/app/events                       # recorded event frames (see README: replay)
+    networks:
+      - reverse-proxy-network
+    depends_on:
+      - halloween-eyes
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.halloween-tracker.rule=Host(`eyes.example.com`) && PathPrefix(`/tracker`)
+      - traefik.http.routers.halloween-tracker.entrypoints=websecure
+      - traefik.http.routers.halloween-tracker.priority=100
+      - traefik.http.services.halloween-tracker.loadbalancer.server.port=8080
+
+  protect-bridge:
+    image: node:22-alpine
+    container_name: halloween-protect-bridge
+    restart: unless-stopped
+    working_dir: /app
+    command: node bridge.mjs
+    environment:
+      PROTECT_HOST: ${PROTECT_HOST}
+      PROTECT_USER: ${PROTECT_USER}
+      PROTECT_PASS: ${PROTECT_PASS}
+      CAMERA_ID: ${CAMERA_ID}
+      RELAY_URL: ws://halloween-eyes:8000
+    volumes:
+      - ./protect-bridge:/app:ro
+    networks:
+      - reverse-proxy-network
+    depends_on:
+      - halloween-eyes
+
+networks:
+  reverse-proxy-network:
+    external: true

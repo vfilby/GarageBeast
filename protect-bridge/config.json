@@ -1,0 +1,37 @@
+{
+  "event_types": [
+    "smartDetectZone",
+    "smartDetectLine",
+    "smartDetectLoiterZone"
+  ],
+  "wake_types": [
+    "person",
+    "vehicle",
+    "animal"
+  ],
+  "min_interval_ms": 1000,
+  "zone_look": false,
+  "look_hold": 3,
+  "zones": {
+    "1": {
+      "name": "driveway",
+      "look": [
+        0,
+        0.3
+      ]
+    },
+    "3": {
+      "name": "driveway-loiter"
+    },
+    "4": {
+      "name": "EyesPeople",
+      "look": [
+        0,
+        -0.2
+      ]
+    },
+    "5": {
+      "name": "EyesPeople-loiter"
+    }
+  }
+}

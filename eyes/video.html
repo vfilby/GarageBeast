@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Video decode test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  #stage { position: fixed; inset: 0; }
+  .door { position: absolute; overflow: hidden; background: #000; }
+  .door video { position: absolute; left: 0; top: 0; display: block; }
+  #post { position: absolute; background: #000; }
+  #hud { position: fixed; left: 12px; bottom: 12px; max-width: calc(100vw - 24px); color: #9d9; font: 13px/1.45 monospace;
+         background: rgba(0,0,0,.78); padding: 8px 10px; border-radius: 6px; white-space: pre; opacity: 0; transition: opacity .3s;
+         pointer-events: none; overflow: hidden; }
+  #hud.show { opacity: 1; }
+  #hud b { color: #fff; font-weight: normal; }
+  #hud .bad { color: #f77; } #hud .ok { color: #7f7; } #hud .warn { color: #fc6; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="hud"></div>
+<script src="nav.js" data-listen></script>
+<script>
+// Video decode test for the projector host. Lays out the same two 9:7 door boxes as the eyes and the Christmas loops,
+// plays synthetic clips (see video/make-clips.sh) in them, and measures what the browser actually manages: decoded
+// frames per second, dropped frames, stalls, and whether each codec is supported / hardware-decoded.
+// It never sends on the relay; nav.js listens so the control page can steer the projector windows here and back.
+//
+// URL:  ?door=left|right|both (default both)   ?clip=<name>   ?auto=1 (run every clip, then show + POST a results table)
+//       ?per=8 (seconds per clip in auto mode)   ?hud=0 (no overlay, for looking at banding)
+// Keys: n / p next / previous clip · a run the suite · space play/pause · h show the HUD · f fullscreen
+(() => {
+  'use strict';
+  const Q = new URLSearchParams(location.search);
+  const stage = document.getElementById('stage'), hud = document.getElementById('hud');
+  const DOOR = ['left', 'right', 'both'].includes(Q.get('door')) ? Q.get('door') : 'both';
+  const SIDES = DOOR === 'both' ? ['left', 'right'] : [DOOR];
+  const DOOR_ASPECT = 9 / 7, GAP = 0.04;
+  const SHOW_HUD = Q.get('hud') !== '0';
+  const PER = +(Q.get('per') || 8);
+
+  // Per-door clips are 1152×896 (9:7); a wide clip is the two-door scene 2352×896 and needs one window spanning both doors.
+  const CLIPS = [
+    { name: 'gradient-h264-crf23-30', file: 'gradient-h264-crf23-30.mp4', fps: 30, codec: 'h264', note: 'banding: cheap H.264' },
+    { name: 'gradient-h264-crf16-30', file: 'gradient-h264-crf16-30.mp4', fps: 30, codec: 'h264', note: 'banding: good H.264' },
+    { name: 'gradient-h264-crf16-60', file: 'gradient-h264-crf16-60.mp4', fps: 60, codec: 'h264', note: '60 fps gradient' },
+    { name: 'gradient-hevc-crf20-30', file: 'gradient-hevc-crf20-30.mp4', fps: 30, codec: 'hevc', note: 'does HEVC play at all?' },
+    { name: 'gradient-vp9-crf28-30', file: 'gradient-vp9-crf28-30.webm', fps: 30, codec: 'vp9', note: 'VP9 gradient' },
+    { name: 'gradient-av1-crf28-30', file: 'gradient-av1-crf28-30.mp4', fps: 30, codec: 'av1', note: 'does AV1 play at all?' },
+    { name: 'grain-h264-30', file: 'grain-h264-30.mp4', fps: 30, codec: 'h264', note: 'decode worst case, banding fix' },
+    { name: 'grain-h264-60', file: 'grain-h264-60.mp4', fps: 60, codec: 'h264', note: 'decode worst case at 60' },
+    { name: 'grain-vp9-30', file: 'grain-vp9-30.webm', fps: 30, codec: 'vp9', note: 'VP9 decode cost' },
+    { name: 'motion-h264-30', file: 'motion-h264-30.mp4', fps: 30, codec: 'h264', note: 'plain throughput' },
+    { name: 'motion-h264-60', file: 'motion-h264-60.mp4', fps: 60, codec: 'h264', note: 'plain throughput at 60' },
+    { name: 'wide-grain-h264-30', file: 'wide-grain-h264-30.mp4', fps: 30, codec: 'h264', wide: true, note: 'one clip across both doors' },
+  ];
+  const CODEC_STR = { h264: 'video/mp4; codecs="avc1.640028"', hevc: 'video/mp4; codecs="hvc1.1.6.L120.90"',
+                      vp9: 'video/webm; codecs="vp09.00.10.08"', av1: 'video/mp4; codecs="av01.0.08M.08"' };
+
+  // ---------- door boxes, laid out like xmas.html ----------
+  let VW = 0, VH = 0, dw = 0, dh = 0, gap = 0, x0 = 0, y0 = 0, SW = 0, boxes = [];
+  function layout() {
+    VW = innerWidth; VH = innerHeight;
+    const n = SIDES.length, totalAspect = DOOR_ASPECT * (n + GAP * (n - 1));
+    let tw = VW, th = VW / totalAspect; if (th > VH) { th = VH; tw = VH * totalAspect; }
+    dh = Math.round(th); dw = Math.round(dh * DOOR_ASPECT); gap = Math.round(dw * GAP);
+    x0 = Math.round((VW - tw) / 2); y0 = Math.round((VH - th) / 2);
+    boxes = SIDES.map((side, i) => ({ side, x: x0 + i * (dw + gap), sceneX: side === 'right' ? dw + gap : 0 }));
+    SW = 2 * dw + gap;
+    build();
+  }
+
+  // ---------- video elements ----------
+  let cur = Math.max(0, CLIPS.findIndex(c => c.name === Q.get('clip')));
+  let videos = [], stalls = 0, autoplayBlocked = false;
+  function mk(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+  function build() {
+    stage.replaceChildren(); videos = []; stalls = 0;
+    const clip = CLIPS[cur];
+    const src = 'video/clips/' + clip.file;
+    const addVideo = (wrap, w, h, dx) => {
+      const v = mk('video'); v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true; v.preload = 'auto';
+      v.width = w; v.height = h; v.style.width = w + 'px'; v.style.height = h + 'px'; v.style.left = -dx + 'px';
+      v.addEventListener('waiting', () => { if (S && performance.now() / 1000 - S.t0 > WARM) stalls++; });   // not the initial buffering
+      v.src = src; wrap.appendChild(v);
+      v.play().catch(() => { autoplayBlocked = true; });
+      videos.push(v);
+    };
+    if (clip.wide) {
+      // One element across both doors, offset for the window's door(s); the post is masked black.
+      boxes.forEach(b => {
+        const d = mk('div', 'door'); Object.assign(d.style, { left: b.x + 'px', top: y0 + 'px', width: dw + 'px', height: dh + 'px' });
+        stage.appendChild(d);
+        addVideo(d, SW, dh, b.sceneX);
+      });
+    } else boxes.forEach(b => {
+      const d = mk('div', 'door'); Object.assign(d.style, { left: b.x + 'px', top: y0 + 'px', width: dw + 'px', height: dh + 'px' });
+      stage.appendChild(d);
+      addVideo(d, dw, dh, 0);
+    });
+    resetStats();
+  }
+  // Note: in door=both preview the wide clip decodes twice (one element per door box); on the projectors each window
+  // is one door, so it decodes once per window either way. Per-door clips decode once per visible door, same as the projectors.
+
+  // ---------- measurement ----------
+  // Per second: decoded frames (from getVideoPlaybackQuality totals) and dropped frames, summed over the visible elements.
+  // The first WARM seconds after a switch are excluded from the per-clip summary (buffering, first decode).
+  const WARM = 1.5;
+  let S = null;
+  function resetStats() { S = { t0: performance.now() / 1000, last: null, samples: [], frames: 0, dropped: 0, presented: 0 }; }
+  function quality() {
+    let total = 0, dropped = 0;
+    for (const v of videos) { const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : { totalVideoFrames: 0, droppedVideoFrames: 0 }; total += q.totalVideoFrames; dropped += q.droppedVideoFrames; }
+    return { total, dropped };
+  }
+  function sample(t) {
+    const q = quality();
+    if (S.last && t - S.t0 > WARM) {
+      const dt = t - S.last.t, f = (q.total - S.last.total) / dt, d = q.dropped - S.last.dropped;
+      S.samples.push({ fps: f, dropped: d }); S.frames += q.total - S.last.total; S.dropped += d;
+    }
+    S.last = { t, ...q };
+  }
+  function summary(clip) {
+    const fpsList = S.samples.map(s => s.fps), n = fpsList.length || 1;
+    const avg = fpsList.reduce((a, b) => a + b, 0) / n, min = fpsList.length ? Math.min(...fpsList) : 0;
+    const perEl = videos.length || 1;
+    return { clip: clip.name, codec: clip.codec, target: clip.fps, elements: videos.length, secs: +(S.samples.length).toFixed(0),
+             decodedFps: +(avg / perEl).toFixed(1), minFps: +(min / perEl).toFixed(1), frames: S.frames, dropped: S.dropped,
+             dropPct: +(S.frames ? 100 * S.dropped / S.frames : 0).toFixed(2), stalls, readyState: videos[0] ? videos[0].readyState : -1,
+             error: videos[0] && videos[0].error ? `MediaError ${videos[0].error.code}` : '' };
+  }
+
+  // Codec support: canPlayType, plus mediaCapabilities (supported / smooth / powerEfficient — the last one is Chromium's
+  // "hardware decoded" flag) at the per-door size for 30 and 60 fps.
+  const support = {};
+  async function probeSupport() {
+    const probe = document.createElement('video');
+    for (const [k, type] of Object.entries(CODEC_STR)) {
+      const r = { canPlay: probe.canPlayType(type) || 'no' };
+      if (navigator.mediaCapabilities) {
+        const [mime, codecs] = type.split('; codecs=');
+        for (const fr of [30, 60]) {
+          try {
+            const i = await navigator.mediaCapabilities.decodingInfo({ type: 'file', video: { contentType: `${mime}; codecs=${codecs}`, width: 1152, height: 896, bitrate: 8e6, framerate: fr } });
+            r[fr] = (i.supported ? 'sup' : 'unsup') + (i.smooth ? '+smooth' : '') + (i.powerEfficient ? '+HW' : '');
+          } catch (e) { r[fr] = 'err'; }
+        }
+      }
+      support[k] = r;
+    }
+  }
+
+  // ---------- HUD ----------
+  let hudUntil = 0, table = '';
+  let rafFrames = 0, rafT = 0, rafFps = 0;
+  function supportLine() {
+    return Object.entries(support).map(([k, r]) => `${k}:${r.canPlay}${r[30] ? ` 30=${r[30]} 60=${r[60]}` : ''}`).join('  ');
+  }
+  function drawHud(t) {
+    if (!SHOW_HUD) return;
+    const clip = CLIPS[cur], q = quality(), sm = summary(clip);
+    const lastS = S.samples[S.samples.length - 1];
+    const cls = sm.dropPct > 2 ? 'bad' : sm.dropPct > 0.2 ? 'warn' : 'ok';
+    hud.innerHTML =
+      `<b>${cur + 1}/${CLIPS.length} ${clip.name}</b>  ${clip.note}  [${clip.wide ? 'wide 2352×896' : '1152×896'} · target ${clip.fps} fps · ${videos.length} element${videos.length > 1 ? 's' : ''}]\n` +
+      `now: <b>${lastS ? (lastS.fps / (videos.length || 1)).toFixed(1) : '…'} fps</b> decoded/element   frames ${q.total}   dropped <span class="${cls}">${q.dropped}</span>` +
+      `   since warm-up: avg ${sm.decodedFps} min ${sm.minFps} dropped ${sm.dropPct}% stalls ${stalls}   display ${rafFps.toFixed(0)} Hz` +
+      (autoplayBlocked ? '   <span class="bad">autoplay blocked: press space</span>' : '') + (sm.error ? `   <span class="bad">${sm.error}</span>` : '') + '\n' +
+      `${supportLine()}\n` +
+      `door=${DOOR} box=${dw}×${dh} win=${VW}×${VH}@${devicePixelRatio}   ${navigator.userAgent.replace(/^.*\((.*?)\).*?(Chrom\S+|Firefox\S+|Safari\S+).*$/, '$1 $2').slice(0, 90)}\n` +
+      `n/p clip · a suite (${PER}s each) · space · h · f` + (auto ? `   <b>suite: ${auto.i + 1}/${CLIPS.length}</b>` : '') +
+      (table ? '\n\n' + table : '');
+    hud.classList.add('show'); hudUntil = t + (table || auto ? 1e9 : 8);
+  }
+
+  // ---------- suite ----------
+  let auto = null, results = [];
+  function select(i) { cur = (i + CLIPS.length) % CLIPS.length; table = ''; build();
+    const u = new URL(location); u.searchParams.set('clip', CLIPS[cur].name); history.replaceState(null, '', u); }
+  function startSuite(t) { results = []; auto = { i: 0, t0: t }; select(0); }
+  function fmtTable(rows) {
+    const cols = [['clip', 26], ['target', 6], ['decodedFps', 8], ['minFps', 6], ['dropped', 7], ['dropPct', 7], ['stalls', 6], ['error', 12]];
+    const line = r => cols.map(([k, w]) => String(r[k] ?? '').padEnd(w)).join(' ');
+    return line(Object.fromEntries(cols.map(([k]) => [k, k]))) + '\n' + rows.map(line).join('\n');
+  }
+  async function finishSuite() {
+    auto = null; table = fmtTable(results); hudUntil = 1e9; drawHud(performance.now() / 1000);
+    const payload = { page: 'video', door: DOOR, box: `${dw}x${dh}`, win: `${VW}x${VH}@${devicePixelRatio}`, displayHz: +rafFps.toFixed(0),
+                      ua: navigator.userAgent, support, results };
+    try { await fetch('report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch {}
+  }
+
+  // ---------- loop ----------
+  let lastSample = 0;
+  function frame() {
+    const t = performance.now() / 1000;
+    rafFrames++; if (t - rafT > 1) { rafFps = rafFrames / (t - rafT); rafFrames = 0; rafT = t; }
+    if (t - lastSample >= 1) { sample(t); lastSample = t; if (hudUntil) drawHud(t); }
+    if (auto && t - auto.t0 >= PER) {
+      results.push(summary(CLIPS[cur]));
+      if (auto.i + 1 >= CLIPS.length) finishSuite();
+      else { auto.i++; auto.t0 = t; select(auto.i); }
+    }
+    if (hudUntil && t > hudUntil) { hud.classList.remove('show'); hudUntil = 0; }
+    requestAnimationFrame(frame);
+  }
+  addEventListener('resize', layout);
+  addEventListener('keydown', e => {
+    const t = performance.now() / 1000;
+    if (e.key === 'n' || e.key === 'ArrowRight') { auto = null; select(cur + 1); drawHud(t); }
+    else if (e.key === 'p' || e.key === 'ArrowLeft') { auto = null; select(cur - 1); drawHud(t); }
+    else if (e.key === 'a') startSuite(t);
+    else if (e.key === ' ') { autoplayBlocked = false; videos.forEach(v => v.paused ? v.play().catch(() => {}) : v.pause()); }
+    else if (e.key === 'h') { if (hudUntil && !table && !auto) { hud.classList.remove('show'); hudUntil = 0; } else drawHud(t); }
+    else if (e.key === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+    else if (e.key === 'Escape') { table = ''; hud.classList.remove('show'); hudUntil = 0; }
+  });
+  // A click/tap also unblocks autoplay and, on a touch device, doubles as "next".
+  addEventListener('pointerdown', () => { if (autoplayBlocked) { autoplayBlocked = false; videos.forEach(v => v.play().catch(() => {})); } });
+
+  probeSupport().then(() => drawHud(performance.now() / 1000));
+  layout();
+  if (Q.get('auto') === '1') startSuite(performance.now() / 1000);
+  rafT = lastSample = performance.now() / 1000;
+  drawHud(rafT); frame();
+})();
+</script>
+</body>
+</html>

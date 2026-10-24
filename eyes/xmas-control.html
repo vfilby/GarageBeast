@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"><title>Christmas Control</title>
+<style>
+/* Same shell as the eyes control page (control.html): preview always visible, only the button panel scrolls;
+   wide screens put the buttons in a side column, phones stack them underneath. */
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr);gap:8px;padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));
+  font:15px system-ui,sans-serif;background:#111;color:#eee;overflow:hidden;-webkit-tap-highlight-color:transparent;user-select:none}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-height:1.4em}
+header h1{font-size:17px;margin:0;font-weight:600}
+header a{font-size:12px;color:#8a8}
+#status{font-size:13px;color:#8a8}
+#status.off{color:#c66}
+/* projector pills: as on control.html */
+#pj{display:inline-flex;gap:6px;flex-wrap:wrap}
+.pj{font-size:12px;line-height:1.5;padding:0 8px 0 7px;border-radius:10px;border:1px solid #444;color:#999;background:#1a1a1e;white-space:nowrap;cursor:default}
+.pj::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:#666;margin-right:5px;vertical-align:1px}
+.pj.ok{color:#bdb}.pj.ok::before{background:#4c4;box-shadow:0 0 5px #4c4}
+.pj.warn{color:#edb}.pj.warn::before{background:#e93;box-shadow:0 0 5px #e93}
+.pj.bad{color:#ecc;border-color:#733}.pj.bad::before{background:#e44;box-shadow:0 0 5px #e44}
+.hint{font-size:12px;color:#888;margin-left:auto}
+header kbd{font:11px ui-monospace,monospace;background:#2a2a2e;border:1px solid #555;border-radius:4px;padding:0 4px}
+@media (max-width:759px){.hint{display:none}}
+main{display:grid;min-height:0;gap:8px;grid-template-rows:auto minmax(0,1fr)}
+/* preview: the two doors, capped so it never eats the screen */
+#vis{display:flex;flex-direction:column;align-items:center;gap:6px;min-height:0}
+#preview{width:min(100%,calc(34dvh * 18.4 / 7));aspect-ratio:18.4/7;border:1px solid #444;border-radius:8px;background:#000;pointer-events:none;display:block}
+#now{font-size:12px;color:#888;margin:0;text-align:center}
+#now b{color:#bdb;font-weight:500}
+#now b.eyes{color:#edb}
+/* buttons */
+#ctl{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px}
+button{position:relative;padding:11px 6px;font-size:14px;background:#2a2a2e;color:#eee;border:1px solid #555;border-radius:10px;touch-action:manipulation;cursor:pointer;font-family:inherit}
+button:active,button.flash{background:#555;border-color:#aaa}
+button.on{background:#1f3a2a;border-color:#4a8}
+button.live{background:#5a2020;border-color:#a44}
+button kbd{position:absolute;top:2px;right:5px;font:11px ui-monospace,monospace;color:#999;background:none}
+h3{font-size:12px;font-weight:500;color:#888;margin:2px 0 -2px;text-transform:uppercase;letter-spacing:.06em}
+.note{font-size:12px;color:#888;margin:0}
+details{font-size:13px;color:#aaa}
+details summary{cursor:pointer;padding:4px 0}
+details button{padding:7px 8px;font-size:13px;margin:4px 4px 0 0}
+details .note{margin:6px 0 0}
+#navCustom{display:flex;gap:6px;margin-top:6px}
+#navCustom input{flex:1;min-width:0;padding:8px;font:13px ui-monospace,monospace;background:#1a1a1e;color:#eee;border:1px solid #555;border-radius:8px}
+#navCustom button{margin:0;padding:8px 14px}
+@media (min-width:760px){
+  main{grid-template-columns:minmax(0,1fr) 280px;grid-template-rows:minmax(0,1fr)}
+  #vis{justify-content:center}
+  #preview{width:min(100%,calc(70dvh * 18.4 / 7))}
+  .grid{grid-template-columns:1fr 1fr}
+  #ctl{padding-right:2px}
+}
+@media (max-height:480px){.hint{display:none}}
+</style></head>
+<body>
+<header>
+  <h1>Christmas Doors</h1>
+  <span id="status" class="off">relay: connecting…</span>
+  <span id="pj" title="projector status, polled by the server over PJLink"></span>
+  <a href="control.html" title="the garage eyes control page">‹ Eyes</a>
+  <span class="hint">keys: <kbd>1–9</kbd>/<kbd>0</kbd> canvas loop · <kbd>C</kbd> cycle · <kbd>E</kbd> random event</span>
+</header>
+<main>
+<div id="vis">
+  <iframe id="preview" tabindex="-1" title="preview of the Christmas scene (same relay feed the projector windows get)"></iframe>
+  <p id="now"></p>
+</div>
+<div id="ctl">
+  <h3>On the projectors</h3>
+  <div class="grid" id="outputs"></div>
+  <p class="note">Picking a scene only changes this preview until the projectors are put on Christmas.</p>
+  <h3>Rendered shows</h3><div class="grid" id="shows" title="rendered shows (video/shows.json, show.html): a background loop, phase-locked across the doors, with events dropped onto it"></div>
+  <h3 id="eventsH" hidden>Events</h3><div class="grid" id="events" title="drop an event of the running show in now (the server also plays one at random every so often)"></div>
+  <h3>Canvas loops</h3><div class="grid" id="loops" title="live canvas themes (xmas.html)"></div>
+  <details><summary>Display windows</summary>
+    <p>Open the scene in its own window (press <b>f</b> for fullscreen, <b>h</b> for the HUD). These never follow the projector steering:
+    <button onclick="openDoor('left')">Left</button><button onclick="openDoor('right')">Right</button><button onclick="openDoor('both')">Both</button></p>
+    <p>Send the projectors anywhere on this site (<code>{out}</code> = left / right):</p>
+    <div id="navCustom"><input id="navUrl" onkeydown="if(event.key==='Enter')navigateCustom()" placeholder="video.html?door={out}&amp;auto=1" spellcheck="false" autocapitalize="off"><button onclick="navigateCustom()">Go</button></div>
+    <p class="note"><code>video.html?door={out}&amp;auto=1</code> is the decode benchmark. The kiosk windows boot on the eyes; the server re-steers them after the Pi's nightly Chromium restart.</p>
+  </details>
+</div>
+</main>
+<script>
+// Christmas control page: the control half of the Christmas doors, separate from the eyes control page (control.html).
+// Display halves: show.html (rendered shows: video background + alpha events) and xmas.html (live canvas loops).
+//
+// A *scene* is a show or a canvas loop. It lives on the relay server ({cmd:'video'} / {cmd:'xmas'}), which the eye pages
+// ignore, so choosing scenes here never disturbs the eyes: the preview below follows it, the projectors do not. "On the
+// projectors" is the go-live switch: it steers the kiosk windows ({cmd:'navigate'}, nav.js) to the scene's display page,
+// or back to the eyes. While Christmas is on the projectors, picking a scene of the other kind re-steers them too.
+let ws = null;
+const statusEl = document.getElementById('status');
+const setStatus = (t, ok) => { statusEl.textContent = t; statusEl.className = ok ? '' : 'off'; };
+if (location.protocol.startsWith('http')) {
+  const connectWs = () => {
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+    ws.onopen = () => setStatus('relay: connected', true);
+    ws.onmessage = e => { try { seen(JSON.parse(e.data)); } catch {} };
+    ws.onclose = () => { ws = null; setStatus('relay: reconnecting…', false); setTimeout(connectWs, 2000); };
+  };
+  connectWs();
+} else setStatus('file:// — needs the relay server (node server.js)', false);
+const send = m => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); };
+const flash = btn => { btn.classList.add('flash'); setTimeout(() => btn.classList.remove('flash'), 160); };
+const button = (parent, label, key, run, title) => {
+  const b = document.createElement('button'); b.textContent = label;
+  if (key) { const k = document.createElement('kbd'); k.textContent = key.toUpperCase(); b.appendChild(k); }
+  if (title) b.title = title;
+  b.addEventListener('click', () => { run(); flash(b); b.blur(); });
+  parent.appendChild(b); return b;
+};
+
+// ---- scene state (mirrors the server: sync on connect, then the stamped video / xmas messages) ----
+// [name, title, key] — same list and keys as LOOPS in xmas.html
+const LOOPS = [['snow', 'Snowfall', '1'], ['flakes', 'Snowflakes', '2'], ['lights', 'String lights', '3'], ['tree', 'Tree of lights', '4'], ['aurora', 'Aurora', '5'],
+               ['fire', 'Hearth', '6'], ['candy', 'Peppermint', '7'], ['sleigh', 'Sleigh', '8'], ['baubles', 'Baubles', '9'], ['frost', 'Frost', '0']];
+const CYCLE = 20;                       // seconds per loop when cycling (the server steps it, so both doors change together)
+let shows = {}, curShow = null, loop = null, cycle = 0;
+const scene = () => curShow ? { kind: 'show', name: curShow } : loop ? { kind: 'loop', name: loop } : null;
+const displayPage = door => (scene() || {}).kind === 'show' ? `show.html?door=${door}` : `xmas.html?door=${door}&hud=0`;
+
+const showsEl = document.getElementById('shows'), eventsEl = document.getElementById('events'), loopsEl = document.getElementById('loops');
+const pickShow = name => { send({ cmd: 'video', name }); curShow = name; goLive(); render(); };
+const pickLoop = (name, cyc = cycle) => {
+  if (curShow) send({ cmd: 'video', name: null });      // a running show would pause the loops' cycle and keep show.html busy
+  send({ cmd: 'xmas', loop: name, cycle: cyc, loops: LOOPS.map(l => l[0]) });
+  curShow = null; loop = name; cycle = cyc; goLive(); render();
+};
+const randomEvent = () => { const names = Object.keys((shows[curShow] || {}).events || {}); if (names.length) send({ cmd: 'event', name: names[Math.floor(Math.random() * names.length)] }); };
+for (const [name, title, key] of LOOPS) button(loopsEl, title, key, () => pickLoop(name), `canvas loop "${name}"`).dataset.loop = name;
+const cycleBtn = button(loopsEl, `Cycle ${CYCLE}s`, 'c', () => pickLoop(loop || LOOPS[0][0], cycle ? 0 : CYCLE), 'step through the canvas loops; the server keeps the beat so both doors change together');
+fetch('video/shows.json').then(r => r.ok ? r.json() : {}).then(j => {
+  shows = j || {};
+  for (const [name, sh] of Object.entries(shows)) button(showsEl, sh.title || name, null, () => pickShow(name), `show "${name}"${sh.events ? ': background + ' + Object.keys(sh.events).length + ' event(s)' : ''}`).dataset.show = name;
+  render();
+}).catch(() => {});
+
+// ---- on the projectors: where each kiosk window is (server: sync.pages), and the go-live / back-to-eyes switch ----
+const EYES_URL = 'index.html?eye={out}&mirror=1';
+const pages = { left: null, right: null };
+const isXmas = u => !!u && /^(show|xmas)\.html/.test(u);
+const isEyes = u => !u || u.startsWith('index.html');
+const live = () => isXmas(pages.left) && isXmas(pages.right);
+const navigate = url => { send({ cmd: 'navigate', out: 'all', url }); pages.left = pages.right = url; render(); };   // the relay doesn't echo to the sender
+const goLive = () => { const url = displayPage('{out}'); if (live() && (pages.left !== url || pages.right !== url)) navigate(url); };
+function navigateCustom() { const u = document.getElementById('navUrl').value.trim(); if (u) navigate(u); }
+const outputsEl = document.getElementById('outputs');
+const eyesBtn = button(outputsEl, 'Eyes', null, () => navigate(EYES_URL), 'put the projectors back on the garage eyes (the kiosk default)');
+const xmasBtn = button(outputsEl, 'Christmas', null, () => navigate(displayPage('{out}')), 'put the projectors on the scene in the preview');
+
+// ---- preview + own windows: reloaded only when the scene changes *page*; show.html / xmas.html follow the relay themselves ----
+const preview = document.getElementById('preview'), nowEl = document.getElementById('now');
+let previewSrc = null; const wins = {};
+const openDoor = door => { const w = window.open(displayPage(door) + '&out=preview', 'xmas-' + door); if (w) wins[door] = w; };   // out=preview: not a projector window, nav.js leaves it alone
+function render() {
+  const s = scene(), src = displayPage('both');
+  if (src !== previewSrc) {
+    preview.src = previewSrc = src;
+    for (const d in wins) if (wins[d] && !wins[d].closed) try { wins[d].location.replace(displayPage(d) + '&out=preview'); } catch {}
+  }
+  for (const b of showsEl.children) b.classList.toggle('on', !!s && s.kind === 'show' && b.dataset.show === s.name);
+  for (const b of loopsEl.children) b.classList.toggle('on', b === cycleBtn ? !!cycle && (!s || s.kind === 'loop') : !!s && s.kind === 'loop' && b.dataset.loop === s.name);
+  const evs = Object.entries((s && s.kind === 'show' && shows[s.name] || {}).events || {});
+  document.getElementById('eventsH').hidden = !evs.length;
+  if (eventsEl.dataset.show !== (evs.length ? s.name : '')) {
+    eventsEl.dataset.show = evs.length ? s.name : ''; eventsEl.replaceChildren();
+    for (const [name, ev] of evs) button(eventsEl, '▶ ' + (ev.title || name), null, () => send({ cmd: 'event', name }), `event "${name}" now`);
+  }
+  eyesBtn.classList.toggle('on', isEyes(pages.left) && isEyes(pages.right));
+  xmasBtn.classList.toggle('live', live());
+  const what = s ? (s.kind === 'show' ? `show “${(shows[s.name] || {}).title || s.name}”` : `canvas loop “${(LOOPS.find(l => l[0] === s.name) || [0, s.name])[1]}”${cycle ? ` (cycling, ${cycle}s)` : ''}`) : 'no scene picked yet';
+  const where = o => isEyes(pages[o]) ? 'eyes' : isXmas(pages[o]) ? 'Christmas' : pages[o];
+  nowEl.replaceChildren(`preview: ${what} · projectors: `);
+  const b = document.createElement('b'); b.className = live() ? '' : 'eyes';
+  b.textContent = pages.left === pages.right || where('left') === where('right') ? where('left') : `left ${where('left')}, right ${where('right')}`;
+  nowEl.appendChild(b);
+}
+
+function seen(m) {
+  if (m.projectors) { pjs = m.projectors; pjAt = Date.now(); renderPj(); }
+  if (m.cmd === 'sync') {
+    Object.assign(pages, { left: null, right: null }, m.pages);
+    curShow = m.video ? m.video.name : null;
+    loop = m.xmas ? m.xmas.loop : null; cycle = m.xmas ? m.xmas.cycle : 0;
+  } else if (m.cmd === 'video') curShow = m.name || null;
+  else if (m.cmd === 'xmas') { loop = m.loop || null; cycle = +m.cycle || 0; }
+  else if (m.cmd === 'navigate' && typeof m.url === 'string') { for (const o of (m.out === 'left' || m.out === 'right' ? [m.out] : ['left', 'right'])) pages[o] = m.url; }
+  else return;
+  render();
+}
+
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+  if (e.target.closest && e.target.closest('input,textarea,select')) return;
+  const key = e.key.toLowerCase(), l = LOOPS.find(l => l[2] === key);
+  const b = l ? [...loopsEl.children].find(b => b.dataset.loop === l[0]) : key === 'c' ? cycleBtn : null;
+  if (b) { e.preventDefault(); b.click(); }
+  else if (key === 'e') randomEvent();
+});
+
+// ---- projector pills: the server's last PJLink answer per unit, aged locally between polls (as on control.html) ----
+// Built with textContent (power/input strings come off a socket from the projector, never trusted as markup).
+const pjEl = document.getElementById('pj'); let pjs = null, pjAt = 0;
+const renderPj = () => {
+  if (!pjs) return;
+  const drift = (Date.now() - pjAt) / 1000;
+  pjEl.replaceChildren(...pjs.map(p => {
+    const age = p.age == null ? null : p.age + drift;
+    let cls = '', text;
+    if (age == null) { cls = 'bad'; text = 'unreachable'; }
+    else if (age > 30) { cls = age > 90 ? 'bad' : 'warn'; text = `no answer ${Math.round(age)}s`; }
+    else if (p.errors && p.errors.length) { cls = 'bad'; text = p.errors.join(', '); }
+    else if (p.power === 'on') { if (p.input === 'HDMI1') { cls = 'ok'; text = 'on'; } else { cls = 'bad'; text = 'on · ' + (p.input || '?'); } }
+    else if (p.power === 'warming' || p.power === 'cooling') { cls = 'warn'; text = p.power; }
+    else text = p.power || '…';
+    const el = document.createElement('span');
+    el.className = 'pj ' + cls;
+    el.textContent = `${p.name} ${text}`;
+    el.title = [p.host, p.power && `power ${p.power}`, p.input && `input ${p.input}`, p.lamp && `lamp ${p.lamp} h`,
+                p.errors && p.errors.length ? 'errors ' + p.errors.join(', ') : 'no errors',
+                age == null ? 'never answered' : `answered ${Math.round(age)}s ago`, p.error && `last error: ${p.error}`].filter(Boolean).join(' · ');
+    return el;
+  }));
+};
+setInterval(renderPj, 1000);
+render();
+</script>
+</body></html>

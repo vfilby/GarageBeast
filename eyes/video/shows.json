@@ -1,0 +1,28 @@
+{
+  "winter": {
+    "title": "Winter night",
+    "background": {
+      "left": "video/shows/winter/night-left.mp4?v=1",
+      "right": "video/shows/winter/night-right.mp4?v=1",
+      "wide": "video/shows/winter/night-wide.mp4?v=1",
+      "seconds": 20
+    },
+    "events": {
+      "sleigh": {
+        "title": "Santa flies through",
+        "left": "video/shows/winter/sleigh-left.webm?v=1",
+        "right": "video/shows/winter/sleigh-right.webm?v=1",
+        "seconds": 15.33
+      }
+    },
+    "every": [20, 50]
+  },
+  "sleigh": {
+    "title": "Sleigh loop (single clip)",
+    "left": "video/shows/sleigh/left.mp4?v=2",
+    "right": "video/shows/sleigh/right.mp4?v=2",
+    "wide": "video/shows/sleigh/wide.mp4?v=2",
+    "fps": 30,
+    "seconds": 20
+  }
+}

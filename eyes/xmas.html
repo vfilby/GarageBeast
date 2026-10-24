@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Christmas loops (test)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 12px; bottom: 12px; color: #9d9; font: 13px/1.5 monospace; background: rgba(0,0,0,.7);
+         padding: 8px 10px; border-radius: 6px; white-space: pre; opacity: 0; transition: opacity .4s; pointer-events: none; }
+  #hud.show { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script src="nav.js" data-listen></script>
+<script>
+// Christmas projector loops — the canvas half of the Christmas doors (rendered shows are show.html), separate from the eyes.
+// It never sends on the relay, so it cannot touch the live eye pages. nav.js opens a listen-only socket: the Christmas
+// control page (xmas-control.html) picks the loop ({cmd:'xmas', loop}; the server steps the auto-cycle so both doors
+// change together) and steers the projector windows here and back. ?solo=1 ignores the relay's loop (working on a theme).
+// Two 9:7 door boxes side by side, laid out exactly like the eyes (?eye=both): ?door=left|right on the projectors, ?door=both (default) to preview.
+// URL:  ?loop=snow|flakes|lights|tree|aurora|fire|candy|sleigh|baubles|frost   ?cycle=N (seconds per loop, auto-advance)   ?hud=0 (never show the caption)
+// Keys: 1–9, 0 = pick a loop · n / p = next / previous · c = toggle auto-cycle · f = fullscreen · h = show the caption
+(() => {
+  'use strict';
+  const Q = new URLSearchParams(location.search);
+  const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const DOOR = ['left', 'right', 'both'].includes(Q.get('door')) ? Q.get('door') : 'both';
+  const SIDES = DOOR === 'both' ? ['left', 'right'] : [DOOR];
+  const DOOR_ASPECT = 9 / 7, GAP = 0.04;   // garage door W:H; the post between the doors as a fraction of a door width
+  const SHOW_HUD = Q.get('hud') !== '0';
+  let VW = 0, VH = 0;   // viewport
+  let W = 0, H = 0;     // what the current loop instance draws into (a door, or the two-door scene)
+
+  // ---------- helpers ----------
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const TAU = Math.PI * 2;
+  // cheap 2-D value noise (smooth), 0..1
+  const PERM = new Uint8Array(512);
+  { const p = Array.from({ length: 256 }, (_, i) => i); for (let i = 255; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; } for (let i = 0; i < 512; i++) PERM[i] = p[i & 255]; }
+  const hashv = (x, y) => PERM[(PERM[x & 255] + y) & 255] / 255;
+  function noise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    return lerp(lerp(hashv(xi, yi), hashv(xi + 1, yi), u), lerp(hashv(xi, yi + 1), hashv(xi + 1, yi + 1), u), v);
+  }
+  const fbm = (x, y) => 0.5 * noise(x, y) + 0.25 * noise(x * 2.1, y * 2.1) + 0.125 * noise(x * 4.3, y * 4.3) + 0.0625 * noise(x * 8.7, y * 8.7);
+  function glowDot(x, y, r, rgb, a) {   // a soft radial glow
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${rgb},${a})`); g.addColorStop(0.4, `rgba(${rgb},${a * 0.35})`); g.addColorStop(1, `rgba(${rgb},0)`);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  }
+  function star5(x, y, r, rot = 0) {
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) { const a = rot - Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * 0.42 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+    ctx.closePath();
+  }
+  // background stars shared by a few loops
+  function makeStars(n) { return Array.from({ length: n }, () => ({ x: Math.random(), y: Math.random(), r: rnd(0.6, 1.8), ph: rnd(0, TAU), f: rnd(0.5, 2.5) })); }
+  function drawStars(stars, t, top = 1, alpha = 1) {
+    for (const s of stars) {
+      if (s.y > top) continue;
+      const a = (0.45 + 0.55 * Math.sin(t * s.f + s.ph)) * alpha;
+      ctx.fillStyle = `rgba(235,240,255,${a.toFixed(3)})`; ctx.beginPath(); ctx.arc(s.x * W, s.y * H, s.r, 0, TAU); ctx.fill();
+    }
+  }
+  // light snow used as a garnish by several loops
+  function makeSnow(n, zmin = 0.3) { return Array.from({ length: n }, () => newFlake(true, zmin)); }
+  function newFlake(anywhere, zmin = 0.2) { const z = rnd(zmin, 1); return { x: Math.random(), y: anywhere ? Math.random() : -0.02, z, r: 1.2 + 3 * z, ph: rnd(0, TAU), f: rnd(0.6, 1.6) }; }
+  function stepSnow(fl, dt, t, wind = 0, speed = 1) {
+    for (const f of fl) {
+      f.y += (0.05 + 0.1 * f.z) * speed * dt;
+      f.x += ((wind * f.z * 0.12) + Math.sin(t * f.f + f.ph) * 0.012 * f.z) * dt;
+      if (f.y > 1.02) { f.y = -0.02; f.x = Math.random(); }
+      if (f.x > 1.02) f.x -= 1.04; else if (f.x < -0.02) f.x += 1.04;
+    }
+  }
+  function drawSnow(fl, alpha = 1) {
+    for (const f of fl) { ctx.fillStyle = `rgba(255,255,255,${(0.35 + 0.65 * f.z) * alpha})`; ctx.beginPath(); ctx.arc(f.x * W, f.y * H, f.r, 0, TAU); ctx.fill(); }
+  }
+
+  // ---------- the loops ----------
+  // Each loop: title, init() (called on entry and on resize), draw(t, dt) drawing into 0..W × 0..H (already clipped, black underneath).
+  const LOOPS = [
+    // 1 — Snowfall: layered flakes with depth, gusting wind, a drift piling up along the bottom.
+    { name: 'snow', title: 'Snowfall', span: true,
+      init() {
+        // tiny crystal sprites: 8 variants, six arms with a pair of side twigs, drawn once at 24 px and scaled per flake
+        this.sprites = Array.from({ length: 8 }, (_, i) => {
+          const c = document.createElement('canvas'); c.width = c.height = 24; const g = c.getContext('2d');
+          g.translate(12, 12); g.strokeStyle = '#fff'; g.lineCap = 'round'; g.lineWidth = 1.6 + (i % 3) * 0.3;
+          const at = 0.45 + (i % 4) * 0.12, tw = 0.3 + (i % 5) * 0.06, hex = i % 2;
+          for (let a = 0; a < 6; a++) {
+            g.save(); g.rotate(a * Math.PI / 3);
+            g.beginPath(); g.moveTo(0, 0); g.lineTo(10, 0); g.stroke();
+            g.beginPath(); g.moveTo(10 * at, 0); g.lineTo(10 * at + 10 * tw * 0.5, -10 * tw * 0.87); g.moveTo(10 * at, 0); g.lineTo(10 * at + 10 * tw * 0.5, 10 * tw * 0.87); g.stroke();
+            if (hex) { g.beginPath(); g.moveTo(3, 0); g.lineTo(1.5, 2.6); g.stroke(); }
+            g.restore();
+          }
+          return c;
+        });
+        this.fl = Array.from({ length: Math.round(W * H / 2200) }, () => this.flake(true));
+        this.wind = 0; this.windT = 0; this.nextGust = 0;
+        this.cols = Math.ceil(W / 6) + 1; this.pile = new Float32Array(this.cols);
+      },
+      // a little snowman, ~20% of the door height, standing in the bottom-left corner of the left door; the drift piles around his base
+      snowman(x, y0, rb, wind) {
+        const balls = [[0, -rb * 0.85, rb], [0, -rb * 0.85 - rb * 0.72 - rb * 0.55, rb * 0.72], [0, -rb * 0.85 - rb * 0.72 - rb * 1.1 - rb * 0.5, rb * 0.52]];
+        ctx.save(); ctx.translate(x, y0);
+        // stick arms first (behind the middle ball's edge)
+        ctx.strokeStyle = '#5a3a1a'; ctx.lineWidth = Math.max(1.5, rb * 0.07); ctx.lineCap = 'round';
+        const [, my, mr] = balls[1];
+        for (const sgn of [-1, 1]) {
+          const ax = sgn * mr * 0.8, ay = my - mr * 0.1, ex = sgn * mr * 2.1, ey = my - mr * 0.9;
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ex, ey); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(lerp(ax, ex, 0.7), lerp(ay, ey, 0.7)); ctx.lineTo(lerp(ax, ex, 0.7) + sgn * mr * 0.25, lerp(ay, ey, 0.7) - mr * 0.35); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex + sgn * mr * 0.3, ey - mr * 0.05); ctx.moveTo(ex, ey); ctx.lineTo(ex + sgn * mr * 0.15, ey - mr * 0.35); ctx.stroke();
+        }
+        for (const [bx, by, r] of balls) {
+          const g = ctx.createRadialGradient(bx - r * 0.35, by - r * 0.4, r * 0.1, bx, by, r);
+          g.addColorStop(0, '#ffffff'); g.addColorStop(0.7, '#e8f0fa'); g.addColorStop(1, '#9fb8d8');
+          ctx.fillStyle = g; ctx.beginPath(); ctx.arc(bx, by, r, 0, TAU); ctx.fill();
+        }
+        const [, hy, hr] = balls[2];
+        // coal eyes, mouth, buttons; carrot nose
+        ctx.fillStyle = '#111';
+        for (const [dx, dy, r] of [[-0.32, -0.15, 0.09], [0.32, -0.15, 0.09], [-0.36, 0.38, 0.06], [-0.15, 0.5, 0.06], [0.15, 0.5, 0.06], [0.36, 0.38, 0.06]]) { ctx.beginPath(); ctx.arc(dx * hr, hy + dy * hr, r * hr, 0, TAU); ctx.fill(); }
+        for (const [by, r] of [[balls[1][1] - mr * 0.35, mr], [balls[1][1] + mr * 0.15, mr], [balls[1][1] + mr * 0.6, mr]]) { ctx.beginPath(); ctx.arc(0, by, r * 0.09, 0, TAU); ctx.fill(); }
+        ctx.fillStyle = '#ff8a1a'; ctx.beginPath(); ctx.moveTo(0, hy + hr * 0.02); ctx.lineTo(hr * 1.1, hy + hr * 0.16); ctx.lineTo(0, hy + hr * 0.22); ctx.closePath(); ctx.fill();
+        // scarf: a wrap between head and body, a tail that lifts with the wind
+        ctx.strokeStyle = '#d42a2a'; ctx.lineWidth = hr * 0.32; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(0, hy + hr * 0.95, hr * 0.85, Math.PI * 1.15, Math.PI * 1.85, true); ctx.stroke();
+        const tx = hr * 0.55, ty = hy + hr * 1.1, flap = clamp(wind, -1, 1);
+        ctx.beginPath(); ctx.moveTo(tx, ty); ctx.quadraticCurveTo(tx + hr * 0.6 + flap * hr * 0.5, ty + hr * 0.6 - Math.abs(flap) * hr * 0.4, tx + hr * 0.7 + flap * hr * 1.1, ty + hr * 1.3 - Math.abs(flap) * hr * 1.0); ctx.stroke();
+        // top hat: near-black with a pale rim so it reads against the black sky, red band
+        const bt = hy - hr * 0.75;
+        ctx.fillStyle = '#161616'; ctx.strokeStyle = 'rgba(220,230,255,.7)'; ctx.lineWidth = Math.max(1, hr * 0.05);
+        ctx.beginPath(); ctx.rect(-hr * 1.1, bt - hr * 0.16, hr * 2.2, hr * 0.2); ctx.fill(); ctx.stroke();          // brim
+        ctx.beginPath(); ctx.rect(-hr * 0.72, bt - hr * 1.35, hr * 1.44, hr * 1.2); ctx.fill(); ctx.stroke();        // crown
+        ctx.fillStyle = '#d42a2a'; ctx.fillRect(-hr * 0.72, bt - hr * 0.45, hr * 1.44, hr * 0.22);                   // band
+        ctx.restore();
+      },
+      flake(anywhere) {   // ~55% tiny crystals (they tumble), the rest soft balls
+        const f = newFlake(anywhere); if (Math.random() < 0.55) { f.sp = this.sprites[Math.random() * this.sprites.length | 0]; f.rot = rnd(0, TAU); f.spin = rnd(-1.2, 1.2); f.r = 3 + 5.5 * f.z; } return f;
+      },
+      draw(t, dt) {
+        if (t > this.nextGust) { this.windT = rnd(-1, 1) * rnd(0.3, 1); this.nextGust = t + rnd(3, 9); }
+        this.wind = lerp(this.wind, this.windT, 1 - Math.exp(-dt / 2.5));
+        for (const f of this.fl) {
+          f.y += (0.06 + 0.16 * f.z) * dt;
+          f.x += (this.wind * f.z * 0.25 + Math.sin(t * f.f + f.ph) * 0.02 * f.z) * dt;
+          if (f.x > 1.02) f.x -= 1.04; else if (f.x < -0.02) f.x += 1.04;
+          const col = clamp(Math.round(f.x * W / 6), 0, this.cols - 1);
+          const floor = 1 - this.pile[col] / H;
+          if (f.y > floor) { if (f.z > 0.55) { this.pile[col] += 1.1; if (col > 0) this.pile[col - 1] += 0.5; if (col < this.cols - 1) this.pile[col + 1] += 0.5; } f.y = -0.02; f.x = Math.random(); }
+          if (f.sp) f.rot += f.spin * dt;
+        }
+        // the drift: smooth the heights, melt a little, cap so the door doesn't fill
+        const cap = H * 0.12;
+        for (let i = 1; i < this.cols - 1; i++) this.pile[i] = Math.min(cap, (this.pile[i - 1] + 2 * this.pile[i] + this.pile[i + 1]) / 4 - 0.4 * dt);
+        this.snowman(H * DOOR_ASPECT * 0.16, H, H * 0.047, this.wind);
+        for (const f of this.fl) {
+          const a = 0.3 + 0.7 * f.z;
+          if (f.sp) { ctx.save(); ctx.globalAlpha = a; ctx.translate(f.x * W, f.y * H); ctx.rotate(f.rot); const d = f.r * 2; ctx.drawImage(f.sp, -f.r, -f.r, d, d); ctx.restore(); }
+          else { ctx.fillStyle = `rgba(255,255,255,${a.toFixed(2)})`; ctx.beginPath(); ctx.arc(f.x * W, f.y * H, f.r, 0, TAU); ctx.fill(); }
+        }
+        ctx.beginPath(); ctx.moveTo(0, H);
+        for (let i = 0; i < this.cols; i++) ctx.lineTo(i * 6, H - Math.max(0, this.pile[i]));
+        ctx.lineTo(W, H); ctx.closePath();
+        const g = ctx.createLinearGradient(0, H - cap, 0, H); g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#c8d8ee');
+        ctx.fillStyle = g; ctx.fill();
+      } },
+
+    // 2 — Crystals: big procedurally grown six-fold snowflakes turning slowly as they drift.
+    { name: 'flakes', title: 'Crystal snowflakes', span: true,
+      init() { const n = Math.round(11 * W / H); this.fl = Array.from({ length: n }, () => this.make(true)); this.bg = makeSnow(Math.round(45 * W / H), 0.2); },   // ~14 per door
+      make(anywhere) {
+        const R = rnd(0.045, 0.1) * Math.min(W, H);   // half the first cut's size
+        const c = document.createElement('canvas'); const S = Math.ceil(R * 2.3); c.width = c.height = S;
+        const g = c.getContext('2d'); g.translate(S / 2, S / 2); g.lineCap = 'round'; g.lineJoin = 'round';
+        g.strokeStyle = 'rgba(255,255,255,.95)'; g.shadowColor = 'rgba(180,220,255,.9)'; g.shadowBlur = R * 0.12;
+        const lw = Math.max(1.2, R * 0.045); g.lineWidth = lw;
+        const kind = Math.random();
+        const branches = Array.from({ length: Math.floor(rnd(2, 5)) }, () => ({ at: rnd(0.25, 0.9), len: rnd(0.2, 0.55), ang: rnd(0.9, 1.15), sub: Math.random() < 0.5 }));
+        branches.sort((a, b) => a.at - b.at);
+        const hex = Math.random() < 0.5 ? rnd(0.08, 0.2) : 0;
+        const plate = kind < 0.35;
+        for (let arm = 0; arm < 6; arm++) {
+          g.save(); g.rotate(arm * Math.PI / 3);
+          g.beginPath(); g.moveTo(0, 0); g.lineTo(R, 0); g.stroke();
+          for (const b of branches) {
+            const x = b.at * R, L = b.len * R * (1 - b.at * 0.5);
+            for (const s of [1, -1]) {
+              g.beginPath(); g.moveTo(x, 0); g.lineTo(x + Math.cos(b.ang) * L, s * Math.sin(b.ang) * L); g.stroke();
+              if (b.sub) { const x2 = x + Math.cos(b.ang) * L * 0.55, y2 = s * Math.sin(b.ang) * L * 0.55; g.beginPath(); g.moveTo(x2, y2); g.lineTo(x2 + Math.cos(b.ang * 0.4) * L * 0.35, y2 + s * Math.sin(b.ang * 0.4) * L * 0.35); g.stroke(); }
+            }
+          }
+          if (plate) { g.lineWidth = lw * 0.7; g.beginPath(); g.moveTo(R * 0.6, 0); g.lineTo(R * 0.8, -R * 0.14); g.lineTo(R, 0); g.lineTo(R * 0.8, R * 0.14); g.closePath(); g.stroke(); g.lineWidth = lw; }
+          g.restore();
+        }
+        if (hex) { g.lineWidth = lw * 0.8; g.beginPath(); for (let i = 0; i < 6; i++) g.lineTo(Math.cos(i * Math.PI / 3) * hex * R, Math.sin(i * Math.PI / 3) * hex * R); g.closePath(); g.stroke(); }
+        return { img: c, S, x: rnd(0.05, 0.95), y: anywhere ? rnd(-0.1, 1) : rnd(-0.35, -0.12), rot: rnd(0, TAU), spin: rnd(-0.25, 0.25), vy: rnd(0.028, 0.06), ph: rnd(0, TAU), f: rnd(0.15, 0.4), sway: rnd(0.02, 0.05), R };
+      },
+      draw(t, dt) {
+        stepSnow(this.bg, dt, t, 0, 0.6); drawSnow(this.bg, 0.55);
+        for (let i = 0; i < this.fl.length; i++) {
+          const f = this.fl[i];
+          f.y += f.vy * dt; f.rot += f.spin * dt;
+          const x = (f.x + Math.sin(t * f.f + f.ph) * f.sway) * W, y = f.y * H;
+          if (y > H + f.R * 1.3) { this.fl[i] = this.make(false); continue; }
+          ctx.save(); ctx.translate(x, y); ctx.rotate(f.rot); ctx.drawImage(f.img, -f.S / 2, -f.S / 2); ctx.restore();
+        }
+      } },
+
+    // 3 — String lights: scalloped strands of bulbs; the pattern changes every few seconds (twinkle, chase, wave, steady).
+    { name: 'lights', title: 'String lights', span: true,
+      init() {
+        const PAL = ['255,40,40', '40,220,80', '60,120,255', '255,190,40', '255,235,200', '255,60,200'];
+        this.strands = []; const rows = 3;
+        for (let s = 0; s < rows; s++) {
+          const y0 = H * (0.14 + s * 0.24), sag = H * 0.06, scallops = 3 + s % 2, bulbs = [];
+          const n = Math.round(W / 46);
+          for (let i = 0; i <= n; i++) {
+            const u = i / n, x = u * W;
+            const y = y0 + sag * Math.abs(Math.sin(u * Math.PI * scallops));
+            bulbs.push({ x, y, col: PAL[(i * 7 + s * 3) % PAL.length], ph: rnd(0, TAU), f: rnd(2, 5), idx: i });
+          }
+          this.strands.push({ bulbs, n });
+        }
+        this.mode = 0; this.modeT = 0;
+      },
+      draw(t, dt) {
+        if (t - this.modeT > 10) { this.mode = (this.mode + 1) % 4; this.modeT = t; }
+        const mode = this.mode, k = t - this.modeT;
+        ctx.strokeStyle = 'rgba(20,60,25,.9)'; ctx.lineWidth = 2;
+        for (const st of this.strands) {
+          ctx.beginPath(); st.bulbs.forEach((b, i) => i ? ctx.lineTo(b.x, b.y) : ctx.moveTo(b.x, b.y)); ctx.stroke();
+          for (const b of st.bulbs) {
+            let lvl;
+            if (mode === 0) lvl = 0.55 + 0.45 * Math.sin(t * b.f + b.ph);                       // twinkle
+            else if (mode === 1) lvl = ((b.idx - Math.floor(t * 6)) % 3 + 3) % 3 === 0 ? 1 : 0.12;   // chase
+            else if (mode === 2) lvl = 0.5 + 0.5 * Math.sin(b.idx * 0.6 - t * 3);               // wave
+            else lvl = 0.95 + 0.05 * Math.sin(t * 8 + b.ph);                                   // steady
+            const a = clamp(lvl, 0, 1), y = b.y + 9;
+            if (a > 0.2) glowDot(b.x, y, 26 + 14 * a, b.col, 0.55 * a);
+            // socket and the bulb
+            ctx.fillStyle = 'rgba(30,50,30,1)'; ctx.fillRect(b.x - 3, b.y - 1, 6, 6);
+            ctx.fillStyle = `rgba(${b.col},${(0.25 + 0.75 * a).toFixed(2)})`;
+            ctx.beginPath(); ctx.ellipse(b.x, y, 5, 8, 0, 0, TAU); ctx.fill();
+            ctx.fillStyle = `rgba(255,255,255,${(0.8 * a).toFixed(2)})`; ctx.beginPath(); ctx.ellipse(b.x - 1.5, y - 2, 1.5, 2.5, 0, 0, TAU); ctx.fill();
+          }
+        }
+      } },
+
+    // 4 — Tree of lights: a cone of coloured lamps on a spiral, slowly turning, a chasing run up the spiral, a pulsing star.
+    { name: 'tree', title: 'Tree of lights',
+      init() {
+        const PAL = ['255,60,60', '60,230,90', '80,140,255', '255,200,50', '255,120,220', '255,240,210'];
+        this.lamps = []; const n = 260;
+        for (let i = 0; i < n; i++) { const u = i / n; this.lamps.push({ u, th: u * TAU * 11, col: PAL[i % PAL.length], ph: rnd(0, TAU), f: rnd(1, 3) }); }
+        this.snow = makeSnow(100, 0.3);
+      },
+      draw(t, dt) {
+        const cx = W / 2, top = H * 0.1, base = H * 0.86, hgt = base - top, rMax = Math.min(W * 0.36, hgt * 0.62);
+        stepSnow(this.snow, dt, t, 0, 0.7); drawSnow(this.snow, 0.5);
+        // the tree body: dark green cone with a faint centre light so it reads on the door
+        const g = ctx.createLinearGradient(cx - rMax, 0, cx + rMax, 0); g.addColorStop(0, '#031a08'); g.addColorStop(0.5, '#0f4a1a'); g.addColorStop(1, '#031a08');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(cx, top); ctx.lineTo(cx + rMax, base); ctx.lineTo(cx - rMax, base); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#3a2410'; ctx.fillRect(cx - rMax * 0.12, base, rMax * 0.24, H * 0.07);
+        // lamps: sort back-to-front by depth
+        const dir = this.side === 'right' ? -1 : 1, rot = t * 0.35 * dir, chase = (t * 0.22) % 1;
+        const pts = this.lamps.map(l => { const r = l.u * rMax, a = l.th + rot, z = Math.sin(a); return { x: cx + Math.cos(a) * r, y: top + l.u * hgt, z, l }; }).sort((a, b) => a.z - b.z);
+        for (const p of pts) {
+          const depth = 0.5 + 0.5 * p.z;
+          let lvl = 0.55 + 0.45 * Math.sin(t * p.l.f + p.l.ph);
+          const d = Math.abs(((p.l.u - chase) % 1 + 1) % 1); if (d < 0.05 || d > 0.95) lvl = 1.4;
+          const a = clamp(lvl * (0.35 + 0.65 * depth), 0, 1), r = 3 + 4 * depth;
+          glowDot(p.x, p.y, r * 5, p.l.col, 0.5 * a);
+          ctx.fillStyle = `rgba(${p.l.col},${a.toFixed(2)})`; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, TAU); ctx.fill();
+        }
+        // the star
+        const pulse = 0.85 + 0.15 * Math.sin(t * 2.2 + (this.side === 'right' ? 1.9 : 0)), sr = rMax * 0.16 * pulse;
+        glowDot(cx, top, sr * 4, '255,220,90', 0.7);
+        ctx.save(); ctx.translate(cx, top); ctx.rotate(Math.sin(t * 0.7) * 0.08); ctx.translate(-cx, -top);
+        star5(cx, top, sr); ctx.fillStyle = '#ffe680'; ctx.fill(); ctx.strokeStyle = '#fff6c8'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.restore();
+        for (let i = 0; i < 4; i++) { const a = t * 0.5 + i * Math.PI / 2, L = sr * (2.2 + 0.6 * Math.sin(t * 3 + i)); ctx.strokeStyle = 'rgba(255,230,120,.5)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * sr, top + Math.sin(a) * sr); ctx.lineTo(cx + Math.cos(a) * L, top + Math.sin(a) * L); ctx.stroke(); }
+      } },
+
+    // 5 — Aurora: rippling curtains of green/teal/violet over a starfield, rendered low-res and scaled.
+    { name: 'aurora', title: 'Northern lights', span: true,
+      init() {
+        this.stars = makeStars(220);
+        this.lw = 320; this.lh = 120;
+        this.buf = document.createElement('canvas'); this.buf.width = this.lw; this.buf.height = this.lh;
+        this.bctx = this.buf.getContext('2d'); this.img = this.bctx.createImageData(this.lw, this.lh);
+        // one dominant curtain, a lower fainter one, a high thin veil
+        this.ribbons = [{ y: 0.66, amp: 0.2, h: 0.6, sp: 0.05, sc: 0.8, hue: 0, k: 1 }, { y: 0.88, amp: 0.12, h: 0.35, sp: 0.04, sc: 1.4, hue: 1, k: 0.7 }, { y: 0.38, amp: 0.1, h: 0.25, sp: 0.07, sc: 0.6, hue: 2, k: 0.45 }];
+      },
+      draw(t) {
+        drawStars(this.stars, t);
+        const { lw, lh, img } = this, d = img.data;
+        const acc = this.acc || (this.acc = new Float32Array(lw * lh * 4)); acc.fill(0);
+        for (let x = 0; x < lw; x++) {
+          const u = x / lw;
+          for (const rb of this.ribbons) {
+            const base = rb.y + (fbm(u * rb.sc + t * rb.sp, rb.hue * 7.1) - 0.5) * 2 * rb.amp;   // where the curtain's bottom edge is
+            // brightness: slow patches × fine vertical rays that drift sideways
+            const patch = Math.pow(clamp(fbm(u * rb.sc * 3 + t * rb.sp * 4, 11 + rb.hue * 3.7 + t * 0.06) * 1.6 - 0.15, 0, 1), 1.4);   // the curtain thins out to nothing in places
+            const rays = 0.45 + 0.55 * noise(u * 90 + t * 1.5 * (rb.hue % 2 ? -1 : 1), 40 + rb.hue * 5 + t * 0.2);
+            const bright = rb.k * patch * rays;
+            const len = rb.h * (0.5 + 0.5 * fbm(u * rb.sc * 2 - t * rb.sp * 2, 23 + rb.hue));
+            for (let y = 0; y < lh; y++) {
+              const v = y / lh, up = base - v;   // distance above the bottom edge
+              if (up < -0.06 || up > len) continue;
+              const k = Math.max(0, up / len);   // 0 at (and below) the bright lower edge, 1 at the faded top
+              const e = up < 0 ? 1 + up / 0.06 : 1, f = e * e * Math.pow(1 - k, 1.3);
+              const a = bright * f;
+              // colour: green at the bottom, teal, then violet/pink up top
+              const r = lerp(20, 190, Math.pow(k, 0.7)), g = lerp(240, 40, Math.pow(k, 0.9)), b = lerp(80, 230, Math.pow(k, 0.6));
+              const i = (y * lw + x) * 4;   // accumulate alpha-weighted colour; normalised below (ImageData is not premultiplied)
+              acc[i] += r * a; acc[i + 1] += g * a; acc[i + 2] += b * a; acc[i + 3] += a;
+            }
+          }
+        }
+        for (let i = 0; i < acc.length; i += 4) {
+          const s = acc[i + 3]; if (!s) { d[i + 3] = 0; continue; }
+          d[i] = acc[i] / s; d[i + 1] = acc[i + 1] / s; d[i + 2] = acc[i + 2] / s; d[i + 3] = Math.min(255, s * 255);
+        }
+        this.bctx.putImageData(img, 0, 0);
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.imageSmoothingEnabled = true; ctx.drawImage(this.buf, 0, 0, W, H); ctx.restore();
+      } },
+
+    // 6 — Hearth: a cellular fire (heat rises and cools) with logs and drifting embers.
+    { name: 'fire', title: 'Hearth',
+      init() {
+        this.fw = 150; this.fh = 110; this.heat = new Uint8Array(this.fw * this.fh);
+        this.buf = document.createElement('canvas'); this.buf.width = this.fw; this.buf.height = this.fh;
+        this.bctx = this.buf.getContext('2d'); this.img = this.bctx.createImageData(this.fw, this.fh);
+        // palette: black → deep red → orange → yellow → white
+        this.pal = [];
+        for (let i = 0; i < 256; i++) {
+          const k = i / 255;
+          const r = clamp(k * 3, 0, 1) * 255, g = clamp((k - 0.25) * 2, 0, 1) * 220, b = clamp((k - 0.7) * 3.3, 0, 1) * 255;
+          this.pal.push([r, g, b, clamp(k * 4, 0, 1) * 255]);
+        }
+        this.embers = []; this.acc = 0; this.o = this.side === 'right' ? 57.3 : 0;   // noise offset so the two hearths don't flicker in step
+      },
+      draw(t, dt) {
+        const { fw, fh, heat } = this;
+        // the source row: hot in the middle third, flickering
+        for (let x = 0; x < fw; x++) { const u = Math.abs(x / fw - 0.5) * 2; const v = clamp(1.3 - u * 1.6 + (noise(x * 0.25 + this.o, t * 7) - 0.5) * 0.8, 0, 1); heat[(fh - 1) * fw + x] = v * 255; heat[(fh - 2) * fw + x] = v * 250; }
+        this.acc += dt; const steps = Math.min(3, Math.floor(this.acc / (1 / 45))); this.acc -= steps / 45;
+        // each cell takes the average of the three cells below it and the one two rows down (smooth), cools a little, and
+        // the whole column sways with a slow noise so the flames lick sideways
+        for (let s = 0; s < steps; s++) for (let y = 0; y < fh - 2; y++) {
+          const sw = (noise(y * 0.1 + t * 0.9 + this.o, t * 1.7) - 0.5) * 2.4, sway = Math.abs(sw) > 0.75 ? Math.sign(sw) : 0;   // mostly straight up, an occasional lick sideways
+          for (let x = 0; x < fw; x++) {
+            const sx = clamp(x + sway, 1, fw - 2), r1 = (y + 1) * fw, r2 = (y + 2) * fw;
+            const src = (heat[r1 + sx - 1] + heat[r1 + sx] + heat[r1 + sx + 1] + heat[r2 + sx]) * 0.25;
+            heat[y * fw + x] = Math.max(0, src - (Math.random() * 4.5 | 0) - 1);
+          }
+        }
+        const d = this.img.data;
+        for (let i = 0; i < fw * fh; i++) { const c = this.pal[heat[i]]; d[i * 4] = c[0]; d[i * 4 + 1] = c[1]; d[i * 4 + 2] = c[2]; d[i * 4 + 3] = c[3]; }
+        this.bctx.putImageData(this.img, 0, 0);
+        const fx = W * 0.15, fwid = W * 0.7, ftop = H * 0.12, fbot = H * 0.8;
+        glowDot(W / 2, fbot, W * 0.45, '255,120,30', 0.25 + 0.05 * Math.sin(t * 9));
+        ctx.save(); ctx.imageSmoothingEnabled = true; ctx.drawImage(this.buf, fx, ftop, fwid, fbot - ftop + 6); ctx.restore();
+        // logs
+        ctx.lineCap = 'round';
+        for (const [x1, y1, x2, y2] of [[0.28, 0.83, 0.72, 0.87], [0.3, 0.9, 0.7, 0.83]]) {
+          ctx.strokeStyle = '#3b2312'; ctx.lineWidth = H * 0.045; ctx.beginPath(); ctx.moveTo(x1 * W, y1 * H); ctx.lineTo(x2 * W, y2 * H); ctx.stroke();
+          ctx.strokeStyle = `rgba(255,90,20,${(0.35 + 0.25 * Math.sin(t * 7 + x1 * 40)).toFixed(2)})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(lerp(x1, x2, 0.2) * W, lerp(y1, y2, 0.2) * H - 3); ctx.lineTo(lerp(x1, x2, 0.6) * W, lerp(y1, y2, 0.6) * H - 3); ctx.stroke();
+        }
+        // embers
+        if (Math.random() < dt * 12) this.embers.push({ x: W * rnd(0.35, 0.65), y: fbot - H * 0.15, vx: rnd(-20, 20), vy: rnd(-90, -50), life: rnd(1.5, 3.5), t0: t, r: rnd(1.2, 2.6) });
+        this.embers = this.embers.filter(e => t - e.t0 < e.life);
+        for (const e of this.embers) {
+          e.x += (e.vx + Math.sin(t * 3 + e.y * 0.05) * 25) * dt; e.y += e.vy * dt; e.vy -= 8 * dt;
+          const k = 1 - (t - e.t0) / e.life; ctx.fillStyle = `rgba(255,${(120 + 100 * k) | 0},40,${k.toFixed(2)})`; ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, TAU); ctx.fill();
+        }
+      } },
+
+    // 7 — Peppermint: a big red-and-white swirl turning, with a soft gloss, and candy canes orbiting it.
+    { name: 'candy', title: 'Peppermint swirl',
+      init() { this.canes = Array.from({ length: 6 }, (_, i) => ({ a: i * TAU / 6, ph: rnd(0, TAU) })); },
+      cane(x, y, s, rot) {
+        ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.lineCap = 'round';
+        const path = () => { ctx.beginPath(); ctx.moveTo(0, s); ctx.lineTo(0, -s * 0.55); ctx.arc(s * 0.3, -s * 0.55, s * 0.3, Math.PI, 0, false); };
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = s * 0.22; path(); ctx.stroke();
+        ctx.strokeStyle = '#e0202a'; ctx.lineWidth = s * 0.22; ctx.setLineDash([s * 0.16, s * 0.16]); ctx.lineDashOffset = -performance.now() / 60; path(); ctx.stroke(); ctx.setLineDash([]);
+        ctx.restore();
+      },
+      draw(t) {
+        const cx = W / 2, cy = H / 2, R = H * 0.37, arms = 8, twist = 2.2, N = 48;   // canes orbit at 1.22 R and must stay inside the door
+        // white disc, then the red arms as smooth spiral-bounded regions (θ = base + twist·(r/R)²)
+        ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+        ctx.fillStyle = '#e8202c';
+        const dir = this.side === 'right' ? -1 : 1, rot = t * 0.8 * dir, sp = k => twist * k * k * dir;
+        for (let a = 0; a < arms; a += 2) {
+          const b0 = rot + a * TAU / arms, b1 = b0 + TAU / arms;
+          ctx.beginPath();
+          for (let i = 0; i <= N; i++) { const k = i / N, th = b0 + sp(k); ctx.lineTo(cx + Math.cos(th) * k * R, cy + Math.sin(th) * k * R); }
+          ctx.arc(cx, cy, R, b0 + sp(1), b1 + sp(1));
+          for (let i = N; i >= 0; i--) { const k = i / N, th = b1 + sp(k); ctx.lineTo(cx + Math.cos(th) * k * R, cy + Math.sin(th) * k * R); }
+          ctx.closePath(); ctx.fill();
+        }
+        // gloss and rim
+        const g = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.35, 0, cx, cy, R); g.addColorStop(0, 'rgba(255,255,255,.35)'); g.addColorStop(0.5, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(120,0,0,.35)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU); ctx.stroke();
+        for (const c of this.canes) { const a = c.a + t * 0.25 * dir, rr = R * 1.22; this.cane(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr * 0.9, R * 0.24, a + Math.PI / 2 + Math.sin(t * 2 + c.ph) * 0.25); }
+      } },
+
+    // 8 — Sleigh: a full moon over a starry, snowy night; Santa's sleigh and reindeer cross every so often, trailing sparkle.
+    { name: 'sleigh', title: "Santa's sleigh", span: true,
+      init() { this.stars = makeStars(180); this.snow = makeSnow(70, 0.3); this.next = 2; this.t0 = -99; this.dur = 9; this.sparks = []; },
+      silhouette(x, y, s, gallop) {
+        ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+        const RIM = 'rgba(255,215,120,.6)';   // black shapes with a thin gold edge: a silhouette on the moon, an outline on the sky
+        const body = () => { ctx.fillStyle = '#000'; ctx.fill(); ctx.strokeStyle = RIM; ctx.lineWidth = 1.1; ctx.stroke(); };
+        const line = (x1, y1, x2, y2) => { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.strokeStyle = RIM; ctx.lineWidth = 2.2; ctx.stroke(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.1; ctx.stroke(); };
+        ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+        // reindeer ×3 ahead of the sleigh (x increases to the right = direction of travel)
+        for (let i = 0; i < 3; i++) {
+          const ox = 46 + i * 34, bob = Math.sin(gallop + i * 1.1) * 2, ph = gallop + i * 1.1;
+          ctx.save(); ctx.translate(ox, bob);
+          ctx.beginPath(); ctx.ellipse(0, 0, 13, 6, 0, 0, TAU); body();            // body
+          ctx.beginPath(); ctx.moveTo(10, -3); ctx.lineTo(17, -12); ctx.lineTo(22, -11); ctx.lineTo(24, -8); ctx.lineTo(17, -6); ctx.lineTo(13, 0); ctx.closePath(); body();   // neck+head
+          for (const [dx, dy] of [[-3, -3], [1, -2], [4, -5]]) line(18 + dx * 0.3, -12, 18 + dx, -12 + dy - 4);   // antlers
+          for (let l = 0; l < 4; l++) { const lx = -8 + l * 5, sw = Math.sin(ph + l * 1.7) * 5; line(lx, 4, lx + sw, 12); }   // legs
+          if (i === 2) { glowDot(25, -8, 7, '255,40,40', 0.9); ctx.fillStyle = '#ff3030'; ctx.beginPath(); ctx.arc(25, -8, 1.6, 0, TAU); ctx.fill(); }   // Rudolph
+          ctx.restore();
+        }
+        line(8, -6, 110, -8);   // reins
+        // sleigh: a curved body with a curled front runner
+        ctx.beginPath(); ctx.moveTo(-28, -2); ctx.quadraticCurveTo(-30, 8, -20, 8); ctx.lineTo(14, 8); ctx.quadraticCurveTo(24, 8, 26, 0); ctx.quadraticCurveTo(29, -8, 22, -8);
+        ctx.quadraticCurveTo(18, -8, 18, -3); ctx.lineTo(-6, -3); ctx.lineTo(-6, -14); ctx.lineTo(-28, -14); ctx.closePath(); body();
+        ctx.beginPath(); ctx.moveTo(-30, 12); ctx.lineTo(24, 12); ctx.quadraticCurveTo(34, 12, 34, 4); ctx.strokeStyle = RIM; ctx.lineWidth = 3; ctx.stroke(); ctx.strokeStyle = '#000'; ctx.lineWidth = 1.6; ctx.stroke();   // runner
+        // Santa
+        ctx.beginPath(); ctx.ellipse(-16, -16, 8, 6, 0, 0, TAU); body(); ctx.beginPath(); ctx.arc(-14, -26, 5, 0, TAU); body();
+        ctx.beginPath(); ctx.moveTo(-18, -29); ctx.lineTo(-12, -37); ctx.lineTo(-9, -28); ctx.closePath(); body();   // hat
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-12, -37, 1.6, 0, TAU); ctx.fill();   // pompom
+        line(-4, -18, 4, -20);   // arm/reins
+        ctx.restore();
+      },
+      draw(t, dt) {
+        const mx = W - H * DOOR_ASPECT * 0.5, my = H * 0.34, mr = H * 0.19;   // moon centred in the right door
+        drawStars(this.stars, t);
+        glowDot(mx, my, mr * 2.2, '240,235,200', 0.35);
+        ctx.fillStyle = '#f4efd2'; ctx.beginPath(); ctx.arc(mx, my, mr, 0, TAU); ctx.fill();
+        ctx.fillStyle = 'rgba(190,185,150,.45)';
+        for (const [dx, dy, r] of [[-0.35, -0.2, 0.18], [0.25, 0.1, 0.12], [-0.05, 0.4, 0.14], [0.4, -0.4, 0.08], [-0.5, 0.35, 0.07]]) { ctx.beginPath(); ctx.arc(mx + dx * mr, my + dy * mr, r * mr, 0, TAU); ctx.fill(); }
+        stepSnow(this.snow, dt, t, 0.3, 0.7); drawSnow(this.snow, 0.6);
+        if (t > this.next) { this.t0 = t; this.next = t + this.dur + rnd(5, 10); }
+        const k = (t - this.t0) / this.dur;
+        // sparkle trail
+        this.sparks = this.sparks.filter(s => t - s.t0 < s.life);
+        for (const s of this.sparks) { const a = 1 - (t - s.t0) / s.life; s.y += 12 * dt; ctx.fillStyle = `rgba(255,225,120,${a.toFixed(2)})`; ctx.beginPath(); ctx.arc(s.x, s.y, 1.2 + a * 1.5, 0, TAU); ctx.fill(); }
+        if (k >= 0 && k <= 1) {
+          const s = Math.min(W, H) / 260;
+          const x = lerp(-140 * s, W + 60 * s, k), y = H * 0.42 - Math.sin(k * Math.PI) * H * 0.18 + Math.sin(t * 2.5) * 4;
+          for (let i = 0; i < 3; i++) this.sparks.push({ x: x - 28 * s + rnd(-6, 6), y: y + 10 * s + rnd(-6, 6), t0: t, life: rnd(0.8, 1.8) });
+          this.silhouette(x, y, s, t * 9);
+        }
+      } },
+
+    // 9 — Baubles: glossy ornaments on strings, each swinging with its own period, a little glitter in the air.
+    { name: 'baubles', title: 'Baubles', span: true,
+      init() {
+        const COLS = [['#ff5a5a', '#8a0000'], ['#ffd34d', '#8a5a00'], ['#5ab0ff', '#003a8a'], ['#7cf28a', '#0a5a1a'], ['#ff7ad9', '#7a0050'], ['#eaeaea', '#4a4a4a'], ['#c09bff', '#3a0a7a']];
+        const dw = H * DOOR_ASPECT, n = Math.max(4, Math.round(dw / 150)); this.b = [];
+        for (let i = 0; i < 2 * n; i++) {   // n per door, kept inside the door so the swing never crosses the post
+          const door = i < n ? 0 : W - dw, j = i % n;
+          const L = H * rnd(0.22, 0.62), r = H * rnd(0.05, 0.085);
+          this.b.push({ x: door + dw * lerp(0.1, 0.9, (j + 0.5) / n) + rnd(-10, 10), L, r, col: COLS[(i * 3 + (i >= n ? 1 : 0)) % COLS.length], amp: rnd(0.06, 0.16), ph: rnd(0, TAU), w: Math.sqrt(9.81 * 300 / L), ring: Math.random() < 0.5, stripe: Math.random() < 0.4 });
+        }
+        this.glit = makeSnow(60, 0.4);
+      },
+      draw(t, dt) {
+        stepSnow(this.glit, dt, t, 0, 0.35);
+        for (const g of this.glit) { const a = 0.3 + 0.7 * Math.abs(Math.sin(t * 5 + g.ph)); ctx.fillStyle = `rgba(255,240,200,${(a * 0.7).toFixed(2)})`; ctx.beginPath(); ctx.arc(g.x * W, g.y * H, 1 + g.z, 0, TAU); ctx.fill(); }
+        for (const b of this.b) {
+          const ang = Math.sin(t * b.w + b.ph) * b.amp * (0.8 + 0.2 * Math.sin(t * 0.3 + b.ph));
+          const x = b.x + Math.sin(ang) * b.L, y = Math.cos(ang) * b.L;
+          ctx.strokeStyle = 'rgba(220,200,140,.7)'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(b.x, 0); ctx.lineTo(x, y); ctx.stroke();
+          ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+          ctx.fillStyle = '#d4af37'; ctx.fillRect(-b.r * 0.18, 0, b.r * 0.36, b.r * 0.28);
+          ctx.strokeStyle = '#d4af37'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, b.r * 0.12, Math.PI, 0); ctx.stroke();
+          const cy = b.r * 1.1;
+          glowDot(0, cy, b.r * 1.7, b.col[0] === '#eaeaea' ? '255,255,255' : hexRgb(b.col[0]), 0.28);
+          const g = ctx.createRadialGradient(-b.r * 0.35, cy - b.r * 0.35, b.r * 0.05, 0, cy, b.r);
+          g.addColorStop(0, '#ffffff'); g.addColorStop(0.12, b.col[0]); g.addColorStop(0.8, b.col[1]); g.addColorStop(1, '#000');
+          ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, cy, b.r, 0, TAU); ctx.fill();
+          if (b.stripe) { ctx.save(); ctx.beginPath(); ctx.arc(0, cy, b.r, 0, TAU); ctx.clip(); ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fillRect(-b.r, cy - b.r * 0.12, b.r * 2, b.r * 0.24); ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(-b.r, cy + b.r * 0.3, b.r * 2, b.r * 0.1); ctx.restore(); }
+          if (b.ring) { ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = b.r * 0.06; ctx.beginPath(); ctx.ellipse(0, cy, b.r * 0.98, b.r * 0.35, 0, 0, TAU); ctx.stroke(); }
+          ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.beginPath(); ctx.ellipse(-b.r * 0.4, cy - b.r * 0.4, b.r * 0.16, b.r * 0.1, -0.7, 0, TAU); ctx.fill();
+          ctx.restore();
+        }
+      } },
+
+    // 10 — Frost: ice ferns grow in from the edges of the glass, then melt away and start again.
+    { name: 'frost', title: 'Window frost',
+      init() {
+        this.buf = document.createElement('canvas'); this.buf.width = W; this.buf.height = H; this.g = this.buf.getContext('2d');
+        this.g.lineCap = 'round'; this.reset(0);
+      },
+      reset(t) {
+        this.g.clearRect(0, 0, W, H); this.tips = []; this.phase = 'grow'; this.pt = t; this.drawn = 0;
+        const seed = (x, y, a) => this.tips.push({ x, y, a, len: 0, max: rnd(80, 220), w: rnd(1.8, 3), gen: 0 });
+        for (let i = 0; i < 9; i++) { seed(rnd(0, W), 0, Math.PI / 2 + rnd(-0.6, 0.6)); seed(rnd(0, W), H, -Math.PI / 2 + rnd(-0.6, 0.6)); }
+        for (let i = 0; i < 6; i++) { seed(0, rnd(0, H), rnd(-0.6, 0.6)); seed(W, rnd(0, H), Math.PI + rnd(-0.6, 0.6)); }
+      },
+      draw(t, dt) {
+        const g = this.g;
+        if (this.phase === 'grow') {
+          const budget = 220 * dt * 60 / 60;   // segments per frame at 60 fps
+          let n = 0;
+          for (let i = 0; i < this.tips.length && n < budget * 4; i++) {
+            const tp = this.tips[i]; if (!tp) continue;
+            const st = rnd(1.4, 2.8);
+            tp.a += rnd(-0.12, 0.12);
+            const nx = tp.x + Math.cos(tp.a) * st, ny = tp.y + Math.sin(tp.a) * st;
+            g.strokeStyle = `rgba(210,235,255,${(0.9 - tp.gen * 0.15).toFixed(2)})`; g.lineWidth = Math.max(0.6, tp.w * (1 - tp.len / tp.max));
+            g.shadowColor = 'rgba(160,210,255,.8)'; g.shadowBlur = 4;
+            g.beginPath(); g.moveTo(tp.x, tp.y); g.lineTo(nx, ny); g.stroke();
+            tp.x = nx; tp.y = ny; tp.len += st; n++;
+            if (Math.random() < 0.08 && tp.gen < 4) { const s = Math.random() < 0.5 ? 1 : -1; this.tips.push({ x: nx, y: ny, a: tp.a + s * Math.PI / 3, len: 0, max: tp.max * rnd(0.3, 0.6), w: tp.w * 0.7, gen: tp.gen + 1 }); }
+            if (tp.len > tp.max || nx < -5 || nx > W + 5 || ny < -5 || ny > H + 5) this.tips[i] = null;
+          }
+          this.tips = this.tips.filter(Boolean);
+          if (this.tips.length === 0 || t - this.pt > 45) { this.phase = 'hold'; this.pt = t; }
+          this.alpha = 1;
+        } else if (this.phase === 'hold') { if (t - this.pt > 6) { this.phase = 'melt'; this.pt = t; } }
+        else { this.alpha = 1 - (t - this.pt) / 5; if (this.alpha <= 0) this.reset(t); }
+        // no sheen: the background stays pure black so the projected rectangle is invisible on the door
+        ctx.globalAlpha = clamp(this.alpha, 0, 1); ctx.drawImage(this.buf, 0, 0); ctx.globalAlpha = 1;
+        // sparkle on the crystals
+        for (let i = 0; i < 12; i++) { const x = ((i * 0.37 + t * 0.05) % 1) * W, y = ((i * 0.61 + t * 0.03) % 1) * H; const a = Math.max(0, Math.sin(t * 4 + i * 2)) * this.alpha; if (a > 0.6) { ctx.fillStyle = `rgba(255,255,255,${(a - 0.6) * 2})`; ctx.beginPath(); ctx.arc(x, y, 2, 0, TAU); ctx.fill(); } }
+      } },
+  ];
+  function hexRgb(h) { return `${parseInt(h.slice(1, 3), 16)},${parseInt(h.slice(3, 5), 16)},${parseInt(h.slice(5, 7), 16)}`; }
+
+  // ---------- page plumbing: two 9:7 door boxes, like the eyes ----------
+  // A loop with span:true draws one scene across both doors (scene coords 0..SW × 0..SH, the post between the doors is a
+  // strip of it nobody sees). Otherwise the loop is instanced once per visible door and draws 0..W × 0..H in that door.
+  let cur = Math.max(0, LOOPS.findIndex(l => l.name === (Q.get('loop') || 'snow')));
+  let cycle = +(Q.get('cycle') || 0), cycleT = 0, hudUntil = 0;
+  let dw = 0, dh = 0, gap = 0, SW = 0, SH = 0, boxes = [], inst = [];
+  function resize() {
+    VW = canvas.width = innerWidth; VH = canvas.height = innerHeight;
+    const n = SIDES.length, totalAspect = DOOR_ASPECT * (n + GAP * (n - 1));
+    let tw = VW, th = VW / totalAspect; if (th > VH) { th = VH; tw = VH * totalAspect; }
+    dh = Math.round(th); dw = Math.round(dh * DOOR_ASPECT); gap = Math.round(dw * GAP);
+    const x0 = Math.round((VW - tw) / 2), y0 = Math.round((VH - th) / 2);
+    boxes = SIDES.map((side, i) => ({ side, x: x0 + i * (dw + gap), y: y0, sceneX: side === 'right' ? dw + gap : 0 }));
+    SW = 2 * dw + gap; SH = dh;
+    initLoop();
+  }
+  function initLoop() {
+    const L = LOOPS[cur];
+    const make = side => { const o = Object.create(L); o.side = side; o.init(); return o; };
+    if (L.span) { W = SW; H = SH; inst = [make('both')]; }
+    else { W = dw; H = dh; inst = boxes.map(b => make(b.side)); }
+  }
+  function drawLoop(t, dt) {
+    const L = LOOPS[cur];
+    if (L.span) {
+      ctx.save(); ctx.beginPath(); for (const b of boxes) ctx.rect(b.x, b.y, dw, dh); ctx.clip();
+      ctx.translate(boxes[0].x - boxes[0].sceneX, boxes[0].y);
+      W = SW; H = SH; inst[0].draw(t, dt); ctx.restore();
+    } else boxes.forEach((b, i) => {
+      ctx.save(); ctx.beginPath(); ctx.rect(b.x, b.y, dw, dh); ctx.clip(); ctx.translate(b.x, b.y);
+      W = dw; H = dh; inst[i].draw(t, dt); ctx.restore();
+    });
+  }
+  function select(i, t, quiet) {
+    cur = (i + LOOPS.length) % LOOPS.length; initLoop(); cycleT = t;
+    const u = new URL(location); u.searchParams.set('loop', LOOPS[cur].name); history.replaceState(null, '', u);
+    if (!quiet) caption(t);
+  }
+  // relay: the control page's loop choice, live ({cmd:'xmas'}) or on (re)connect (sync.xmas). No caption: this is the door.
+  // A window steered here has no ?loop=: hold black until sync says which one (1 s at most), or the door flashes snow first.
+  let waitSync = Q.get('solo') !== '1' && !Q.get('loop') && location.protocol.startsWith('http') ? performance.now() / 1000 + 1 : 0;
+  if (Q.get('solo') !== '1') nav.on(m => {
+    if (m.cmd === 'sync') waitSync = 0;
+    const name = m.cmd === 'xmas' ? m.loop : m.cmd === 'sync' && m.xmas ? m.xmas.loop : null;
+    const i = LOOPS.findIndex(l => l.name === name);
+    if (i >= 0) { cycle = 0; if (i !== cur) select(i, performance.now() / 1000, true); }   // the server cycles; the page's own timer stands down
+  });
+  function caption(t, secs = 3) {
+    if (!SHOW_HUD) return;
+    const L = LOOPS[cur];
+    hud.textContent = `${cur + 1}. ${L.title}  [${L.span ? 'one scene across both doors' : 'one per door'}]   (${LOOPS.map((l, i) => `${(i + 1) % 10}=${l.name}`).join(' ')})\n` +
+      `door=${DOOR} · n/p next/prev · c cycle${cycle ? ` (${cycle}s, on)` : ' (off)'} · f fullscreen · h this caption`;
+    hud.classList.add('show'); hudUntil = t + secs;
+  }
+  addEventListener('resize', resize);
+  addEventListener('keydown', e => {
+    const t = performance.now() / 1000;
+    if (e.key >= '0' && e.key <= '9') select(e.key === '0' ? 9 : +e.key - 1, t);
+    else if (e.key === 'n' || e.key === 'ArrowRight' || e.key === ' ') select(cur + 1, t);
+    else if (e.key === 'p' || e.key === 'ArrowLeft') select(cur - 1, t);
+    else if (e.key === 'c') { cycle = cycle ? 0 : 20; cycleT = t; caption(t); }
+    else if (e.key === 'h') caption(t, 6);
+    else if (e.key === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+  });
+  let last = performance.now() / 1000, frames = 0, fps = 0, fpsT = last;
+  window.__xmasDebug = () => `t=${(performance.now() / 1000).toFixed(1)} frames=${frames} fps=${fps.toFixed(0)} loop=${LOOPS[cur].name} door=${DOOR} box=${dw}x${dh}`;
+  function frame() {
+    const t = performance.now() / 1000, dt = Math.min(0.05, t - last); last = t;
+    frames++; if (t - fpsT > 1) { fps = frames / (t - fpsT); frames = 0; fpsT = t; }
+    if (cycle && t - cycleT > cycle) select(cur + 1, t);
+    if (hudUntil && t > hudUntil) { hud.classList.remove('show'); hudUntil = 0; }
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VW, VH);
+    if (t > waitSync) drawLoop(t, dt);
+    requestAnimationFrame(frame);
+  }
+  resize(); caption(last, 5); frame();
+})();
+</script>
+</body>
+</html>

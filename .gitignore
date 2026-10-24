@@ -1,0 +1,14 @@
+.env
+*.env
+!.env.example
+.DS_Store
+__pycache__/
+*.onnx
+*.pt
+.claude/
+video/out/
+eyes/video/clips/
+eyes/video/reports.jsonl
+# Rendered Christmas show clips (~70 MB). Regenerate with eyes/video/blender/winter.py + encode.sh
+# (see README: Christmas loops); shows.json expects them under eyes/video/shows/<show>/.
+eyes/video/shows/

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Projector show</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  #stage { position: fixed; inset: 0; }
+  .door { position: absolute; overflow: hidden; background: #000; }
+  .door video { position: absolute; left: 0; top: 0; display: block; }
+  .door video.event { visibility: hidden; }
+  .door video.event.on { visibility: visible; }
+  #hud { position: fixed; left: 12px; bottom: 12px; color: #9d9; font: 13px/1.45 monospace; background: rgba(0,0,0,.78);
+         padding: 8px 10px; border-radius: 6px; white-space: pre; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #hud.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="hud"></div>
+<script src="nav.js" data-listen></script>
+<script>
+// Rendered shows on the projectors, in the same two 9:7 door boxes as everything else, phase-locked across windows.
+//
+// A show (video/shows.json) is either a single looping clip set, or a persistent *background* loop with *events*
+// layered on it: short transparent clips (VP9 alpha WebM) the server drops in at random intervals, or on demand from
+// the control page — Santa flies through, a snowman shivers, kids throw snowballs — so the doors stay consistent but
+// never repeat. Each is one file per door (or a wide file spanning both).
+//
+// Sync: the two projectors are two Chromium windows, so a scene crossing the post needs both files at the same point.
+// {cmd:'video', name, t0} — t0 is the server-clock time the background loop started (sync carries it as `video`);
+// each window keeps a server-clock offset from the `t` stamp on brain messages (as eye.js does), computes where the
+// loop should be, and holds its element there: a hard seek when far off (load, stall), a gentle playbackRate nudge
+// otherwise. {cmd:'event', name, t0} starts an event at its server time; the element is preloaded and seeks to
+// (now − t0) so a window that gets the message late still lands on the right frame.
+//
+// URL: ?door=left|right|both (default both)   ?show=name (standalone preview: loop from load, no relay)   ?hud=1
+// Keys: h HUD · f fullscreen · e trigger a random event (standalone)
+(() => {
+  'use strict';
+  const Q = new URLSearchParams(location.search);
+  const stage = document.getElementById('stage'), hud = document.getElementById('hud');
+  const DOOR = ['left', 'right', 'both'].includes(Q.get('door')) ? Q.get('door') : 'both';
+  const SIDES = DOOR === 'both' ? ['left', 'right'] : [DOOR];
+  const DOOR_ASPECT = 9 / 7, GAP = 0.04;
+  const now = () => performance.now() / 1000;
+
+  // ---------- door boxes ----------
+  let VW = 0, VH = 0, dw = 0, dh = 0, gap = 0, x0 = 0, y0 = 0, SW = 0, boxes = [];
+  function layout() {
+    VW = innerWidth; VH = innerHeight;
+    const n = SIDES.length, totalAspect = DOOR_ASPECT * (n + GAP * (n - 1));
+    let tw = VW, th = VW / totalAspect; if (th > VH) { th = VH; tw = VH * totalAspect; }
+    dh = Math.round(th); dw = Math.round(dh * DOOR_ASPECT); gap = Math.round(dw * GAP);
+    x0 = Math.round((VW - tw) / 2); y0 = Math.round((VH - th) / 2);
+    boxes = SIDES.map((side, i) => ({ side, x: x0 + i * (dw + gap), sceneX: side === 'right' ? dw + gap : 0 }));
+    SW = 2 * dw + gap;
+    build();
+  }
+
+  // ---------- shows ----------
+  let shows = {}, cur = null, t0 = null, videos = [], events = {}, running = null, stalls = 0, autoplayBlocked = false;
+  const ready = fetch('video/shows.json').then(r => r.ok ? r.json() : {}).then(j => { shows = j || {}; }).catch(() => {});
+  const bgOf = sh => sh.background || sh;                       // a plain clip set is its own background
+  function mk(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+  function videoEl(wrap, src, w, h, dx, cls) {
+    const v = mk('video', cls); v.muted = true; v.autoplay = false; v.playsInline = true; v.preload = 'auto';
+    v.width = w; v.height = h; v.style.width = w + 'px'; v.style.height = h + 'px'; v.style.left = -dx + 'px';
+    v.addEventListener('waiting', () => stalls++);
+    v.src = src; wrap.appendChild(v);
+    return v;
+  }
+  function build() {
+    stage.replaceChildren(); videos = []; events = {}; running = null; stalls = 0;
+    const sh = cur && shows[cur];
+    if (!sh) return;
+    const bg = bgOf(sh);
+    boxes.forEach(b => {
+      const d = mk('div', 'door'); Object.assign(d.style, { left: b.x + 'px', top: y0 + 'px', width: dw + 'px', height: dh + 'px' });
+      stage.appendChild(d);
+      // background: loops forever, phase-locked
+      const src = bg[b.side] || bg.wide; if (!src) return;
+      const v = bg[b.side] ? videoEl(d, src, dw, dh, 0, 'bg') : videoEl(d, src, SW, dh, b.sceneX, 'bg');
+      v.loop = true; v.addEventListener('loadedmetadata', () => { v.dataset.ready = '1'; align(v, true); });
+      v.play().catch(() => { autoplayBlocked = true; }); videos.push(v);
+      // events: one preloaded, hidden element per event per door, shown while it plays
+      for (const [name, ev] of Object.entries(sh.events || {})) {
+        const esrc = ev[b.side] || ev.wide; if (!esrc) continue;
+        const e = ev[b.side] ? videoEl(d, esrc, dw, dh, 0, 'event') : videoEl(d, esrc, SW, dh, b.sceneX, 'event');
+        e.addEventListener('ended', () => { e.classList.remove('on'); e.currentTime = 0; if (running && running.name === name) running = null; });
+        (events[name] = events[name] || []).push(e);
+      }
+    });
+  }
+
+  // ---------- server clock and phase lock ----------
+  let clockOffset = null;
+  function stamp(m) {
+    if (typeof m.t !== 'number') return;
+    const s = m.t - now();
+    if (clockOffset === null || m.cmd === 'sync' || s > clockOffset || s < clockOffset - 1) clockOffset = s;
+  }
+  const serverNow = () => now() + (clockOffset || 0);
+  const expected = v => { if (t0 === null || !v.duration) return null; const p = (serverNow() - t0) % v.duration; return p < 0 ? p + v.duration : p; };
+  const HARD = 0.25, NUDGE = 0.04;
+  let lastDiff = 0, lastRate = 1;
+  function align(v, force) {
+    const e = expected(v); if (e === null || !v.dataset.ready) return;
+    let d = e - v.currentTime;
+    if (d > v.duration / 2) d -= v.duration; else if (d < -v.duration / 2) d += v.duration;
+    lastDiff = d;
+    if (force || Math.abs(d) > HARD) { v.currentTime = e; v.playbackRate = lastRate = 1; return; }
+    v.playbackRate = lastRate = Math.abs(d) < 0.008 ? 1 : 1 + Math.max(-NUDGE, Math.min(NUDGE, d * 0.5));
+  }
+  setInterval(() => { for (const v of videos) align(v, false); }, 500);
+
+  function show(name, start) {
+    const changed = name !== cur;
+    cur = name && shows[name] ? name : null; t0 = start;
+    if (changed) build(); else for (const v of videos) align(v, true);
+    drawHud();
+  }
+  function event(name, start) {
+    const els = events[name]; if (!els) return;
+    const pos = Math.max(0, serverNow() - start);
+    for (const e of els) {
+      if (e.readyState >= 1 && pos > (e.duration || 999) - 0.2) continue;     // already over
+      const go = () => { e.currentTime = pos + (now() - t1); e.classList.add('on'); e.play().catch(() => { autoplayBlocked = true; }); };
+      const t1 = now();
+      if (e.readyState >= 1) go(); else e.addEventListener('loadedmetadata', go, { once: true });
+    }
+    running = { name, t0: start };
+  }
+  nav.on(m => {
+    stamp(m);
+    if (m.cmd === 'sync') ready.then(() => {
+      if (m.video) { show(m.video.name, m.video.t0); if (m.event) event(m.event.name, m.event.t0); }
+      else if (!Q.get('show')) show(null, null);
+    });
+    else if (m.cmd === 'video') ready.then(() => show(m.name, m.t0));
+    else if (m.cmd === 'event') ready.then(() => event(m.name, m.t0));
+  });
+  // standalone preview (?show=name): loop from page load, `e` fires a random event
+  if (Q.get('show')) ready.then(() => { if (clockOffset === null) clockOffset = 0; show(Q.get('show'), now()); });
+
+  // ---------- HUD ----------
+  let hudOn = Q.get('hud') === '1';
+  function drawHud() {
+    if (!hudOn) { hud.classList.remove('show'); return; }
+    const v = videos[0];
+    const q = v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+    hud.textContent =
+      `show=${cur || 'none'} door=${DOOR} box=${dw}×${dh}  t0=${t0 === null ? '—' : t0.toFixed(2)}  clock offset ${clockOffset === null ? '—' : clockOffset.toFixed(3)}  event=${running ? running.name : '—'}\n` +
+      (v ? `pos ${v.currentTime.toFixed(3)} / ${(v.duration || 0).toFixed(3)}  expected ${(expected(v) ?? 0).toFixed(3)}  diff ${(lastDiff * 1000).toFixed(0)} ms  rate ${lastRate.toFixed(3)}` +
+           `  frames ${q ? q.totalVideoFrames : '?'} dropped ${q ? q.droppedVideoFrames : '?'} stalls ${stalls}${autoplayBlocked ? '  AUTOPLAY BLOCKED' : ''}` : 'no video');
+    hud.classList.add('show');
+  }
+  setInterval(drawHud, 500);
+  window.__showDebug = () => ({ show: cur, t0, clockOffset, event: running,
+    videos: videos.map(v => ({ pos: v.currentTime, expected: expected(v), duration: v.duration, rate: v.playbackRate, ready: v.readyState, dropped: v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().droppedVideoFrames : null })),
+    events: Object.fromEntries(Object.entries(events).map(([k, els]) => [k, els.map(e => ({ on: e.classList.contains('on'), pos: e.currentTime, duration: e.duration, ready: e.readyState }))])), stalls });
+
+  addEventListener('resize', layout);
+  addEventListener('keydown', e => {
+    if (e.key === 'h') { hudOn = !hudOn; drawHud(); }
+    else if (e.key === 'f') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+    else if (e.key === 'e') { const names = Object.keys(events); if (names.length) event(names[Math.floor(Math.random() * names.length)], serverNow()); }
+    else if (e.key === ' ') { autoplayBlocked = false; videos.forEach(v => v.play().catch(() => {})); }
+  });
+  addEventListener('pointerdown', () => { if (autoplayBlocked) { autoplayBlocked = false; videos.forEach(v => v.play().catch(() => {})); } });
+  layout();
+})();
+</script>
+</body>
+</html>

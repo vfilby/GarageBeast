@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Garage Eye</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 12px; bottom: 12px; color: #6a6; font: 12px/1.5 monospace;
+         background: rgba(0,0,0,.6); padding: 8px 10px; border-radius: 6px; white-space: pre; display: none; }
+  body.debug #hud { display: block; }
+  body.debug { cursor: default; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script src="eye.js"></script>
+</body>
+</html>

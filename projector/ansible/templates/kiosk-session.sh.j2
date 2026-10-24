@@ -1,0 +1,38 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# Eye-slinger kiosk X session: one fullscreen Chromium per projector, relaunched if it dies.
+# LightDM restarts this whole session if the script itself exits.
+
+mkdir -p "$HOME/.kiosk"
+
+# Never blank, never sleep, no cursor.
+xset s off
+xset s noblank
+xset -dpms
+unclutter -idle 0 -root &
+
+# Fixed side-by-side layout. The kernel already forces both connectors on
+# (video=...D on the cmdline), so this holds even when a projector is off.
+xrandr{% for o in outputs %} --output {{ o.x_output }} --mode {{ kiosk_width }}x{{ kiosk_height }} --rate {{ kiosk_refresh }} --pos {{ loop.index0 * kiosk_width }}x0{% endfor %}
+
+
+launch() {
+  local name=$1 x=$2 url=$3
+  while true; do
+    chromium \
+      --kiosk --incognito --noerrdialogs --disable-infobars --no-first-run \
+      --disable-session-crashed-bubble --disable-features=TranslateUI \
+      --autoplay-policy=no-user-gesture-required --password-store=basic \
+      --check-for-update-interval=31536000 \
+      --user-data-dir="$HOME/.kiosk/$name" \
+      --window-position=${x},0 --window-size={{ kiosk_width }},{{ kiosk_height }} \
+      "$url" >/dev/null 2>&1
+    sleep 2
+  done
+}
+
+{% for o in outputs %}
+launch {{ o.name }} {{ loop.index0 * kiosk_width }} "{{ o.url }}" &
+{% endfor %}
+
+wait
